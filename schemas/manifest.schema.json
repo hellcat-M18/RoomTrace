@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roomtrace.local/schema/manifest-v1.json",
+  "title": "RoomTrace capture manifest",
+  "type": "object",
+  "required": ["format", "format_version", "capabilities", "coordinate_system"],
+  "properties": {
+    "format": {"const": "roomcap"},
+    "format_version": {"type": "integer", "minimum": 1},
+    "capture_id": {"type": "string"},
+    "created_at": {"type": "string"},
+    "complete": {"type": "boolean"},
+    "device": {"type": "object"},
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "rgb": {"type": "boolean"},
+        "pose": {"type": "boolean"},
+        "raw_depth": {"type": "boolean"},
+        "depth_confidence": {"type": "boolean"}
+      },
+      "additionalProperties": {"type": "boolean"}
+    },
+    "coordinate_system": {
+      "type": "object",
+      "required": ["pose", "camera_forward", "up_axis", "units"],
+      "properties": {
+        "pose": {"enum": ["camera_to_world"]},
+        "camera_forward": {"enum": ["-Z"]},
+        "up_axis": {"enum": ["Y"]},
+        "units": {"const": "m"}
+      }
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "frames": {"type": "string"},
+        "intrinsics": {"type": "string"},
+        "checksums": {"type": "string"}
+      }
+    }
+  },
+  "additionalProperties": true
+}

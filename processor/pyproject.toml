@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roomtrace-processor"
+version = "0.1.0"
+description = "Windows-side reconstruction and Blender export tools for RoomTrace captures"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+science = ["scipy>=1.10"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+roomtrace = "roomtrace.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

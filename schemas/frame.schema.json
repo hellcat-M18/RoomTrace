@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roomtrace.local/schema/frame-v1.json",
+  "title": "RoomTrace frame record",
+  "type": "object",
+  "required": ["frame_id", "timestamp_ns", "image", "pose_c2w"],
+  "properties": {
+    "frame_id": {"type": "integer", "minimum": 0},
+    "timestamp_ns": {"type": "integer", "minimum": 0},
+    "image": {"type": "string", "minLength": 1},
+    "depth": {"type": ["string", "null"]},
+    "confidence": {"type": ["string", "null"]},
+    "pose_c2w": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "number"}},
+    "tracking_state": {"type": "string"},
+    "image_timestamp_ns": {"type": ["integer", "null"]},
+    "depth_timestamp_ns": {"type": ["integer", "null"]},
+    "metadata": {"type": "object"},
+    "quality": {"type": "object"}
+  },
+  "additionalProperties": true
+}
+

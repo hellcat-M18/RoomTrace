@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#10151d" />
+    <meta name="description" content="RoomTrace browser capture for WebXR depth sensing" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>RoomTrace Capture</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">ROOMTRACE / BROWSER CAPTURE</p>
+        <h1>部屋を歩いて撮影する</h1>
+        <p class="lead">スマホのブラウザだけでAR姿勢とDepthを収録し、Blender用のZIPを作ります。</p>
+      </header>
+
+      <section class="card capabilities" aria-labelledby="capability-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">CHECK</p>
+            <h2 id="capability-title">この端末で使えるか</h2>
+          </div>
+          <span class="privacy">データは端末内で処理</span>
+        </div>
+        <div class="capability-grid">
+          <div class="capability" id="camera-capability" data-state="pending">カメラ: 確認中</div>
+          <div class="capability" id="xr-capability" data-state="pending">WebXR AR: 確認中</div>
+          <div class="capability" id="depth-capability" data-state="pending">Depth: 確認中</div>
+        </div>
+        <p class="hint">GitHub PagesのHTTPS URLを、ARCore対応のAndroid Chromeで開いてください。Depthが使えない端末では、処理できないデータを作らないため収録を開始できません。</p>
+      </section>
+
+      <section class="card capture-card" aria-labelledby="capture-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">CAPTURE</p>
+            <h2 id="capture-title">撮影</h2>
+          </div>
+          <div class="metrics" aria-live="polite">
+            <span><strong id="frame-count">0</strong> frames</span>
+            <span><strong id="depth-count">0</strong> depth</span>
+            <span><strong id="elapsed">0.0 s</strong></span>
+          </div>
+        </div>
+
+        <div class="preview-wrap">
+          <video id="preview" autoplay muted playsinline></video>
+          <div class="preview-overlay" aria-hidden="true">
+            <span class="corner top-left"></span>
+            <span class="corner top-right"></span>
+            <span class="corner bottom-left"></span>
+            <span class="corner bottom-right"></span>
+          </div>
+        </div>
+        <canvas id="camera" hidden></canvas>
+        <canvas id="xr-canvas" width="1" height="1" hidden></canvas>
+
+        <div class="actions">
+          <button id="start-camera" class="secondary">カメラを準備</button>
+          <button id="start-capture" class="primary" disabled>AR収録を開始</button>
+          <button id="stop-capture" class="danger" disabled>停止してZIP化</button>
+        </div>
+
+        <p id="status" class="status" data-kind="info" role="status" aria-live="polite">対応状況を確認しています…</p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <p id="instructions" class="instructions">カメラを準備すると、撮影の開始ボタンが有効になります。</p>
+        <a id="download" class="download" hidden>roomcap.zipを保存</a>
+      </section>
+
+      <section class="card guide" aria-labelledby="guide-title">
+        <p class="eyebrow">WALKTHROUGH</p>
+        <h2 id="guide-title">撮影のコツ</h2>
+        <ol>
+          <li>部屋の中央で数秒待ち、ゆっくり外周を一周する。</li>
+          <li>壁・家具・床・天井を複数方向から見る。</li>
+          <li>最後に開始地点へ戻り、同じ場所をもう一度見る。</li>
+          <li>完了後ZIPを保存し、Windows側のRoomTrace Processorへ送る。</li>
+        </ol>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

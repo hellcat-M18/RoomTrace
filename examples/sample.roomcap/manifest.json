@@ -1,0 +1,27 @@
+{
+  "format": "roomcap",
+  "format_version": 1,
+  "capture_id": "sample-room",
+  "created_at": "1970-01-01T00:00:00Z",
+  "device": {
+    "manufacturer": "RoomTrace",
+    "model": "Synthetic fixture"
+  },
+  "capabilities": {
+    "rgb": true,
+    "pose": true,
+    "raw_depth": true,
+    "depth_confidence": true
+  },
+  "coordinate_system": {
+    "pose": "camera_to_world",
+    "camera_forward": "-Z",
+    "up_axis": "Y",
+    "units": "m"
+  },
+  "files": {
+    "frames": "frames.jsonl",
+    "intrinsics": "intrinsics.json",
+    "checksums": "checksums.sha256"
+  }
+}

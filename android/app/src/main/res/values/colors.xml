@@ -1,0 +1,8 @@
+<resources>
+    <color name="roomtrace_background">#CC101418</color>
+    <color name="roomtrace_accent">#FFD166</color>
+    <color name="roomtrace_good">#75E39A</color>
+    <color name="roomtrace_warn">#FFB86B</color>
+    <color name="roomtrace_bad">#FF7676</color>
+</resources>
+

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+processor/.venv/
+.pytest_cache/
+examples/*-output/
+*.iml
+.gradle/
+android/local.properties
+android/.idea/
+android/app/build/
+.tools/
+RoomTrace-Capture.apk
+windows/.roomtrace-installed
