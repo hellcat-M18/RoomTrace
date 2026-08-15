@@ -81,6 +81,26 @@
         </ol>
       </section>
     </main>
+
+    <aside id="capture-hud" class="capture-hud" hidden aria-label="収録中の操作">
+      <div class="capture-hud-top">
+        <button id="cancel-capture" class="hud-button hud-cancel" type="button">中止して戻る</button>
+        <div class="hud-status" aria-live="polite">
+          <span class="recording-dot" aria-hidden="true"></span>
+          <span id="capture-hud-status">収録中</span>
+        </div>
+      </div>
+      <div class="capture-hud-bottom">
+        <div class="coverage-card">
+          <canvas id="coverage-map" width="160" height="160" aria-label="上から見た撮影経路"></canvas>
+          <div>
+            <strong>撮影した場所</strong>
+            <span id="coverage-summary">Depthを待っています</span>
+          </div>
+        </div>
+        <button id="finish-capture" class="hud-button hud-finish" type="button">完了して保存</button>
+      </div>
+    </aside>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

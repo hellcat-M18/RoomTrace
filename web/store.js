@@ -76,9 +76,28 @@ export class CaptureStore {
     return result.sort((left, right) => left.frameId - right.frameId);
   }
 
+  async discard() {
+    await this.flush();
+    const database = await this.database;
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(["meta", "frames"], "readwrite");
+      transaction.objectStore("meta").delete(this.captureId);
+      const frameIndex = transaction.objectStore("frames").index("captureId");
+      const cursorRequest = frameIndex.openCursor(IDBKeyRange.only(this.captureId));
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      cursorRequest.onerror = () => reject(cursorRequest.error || new Error("capture frames could not be deleted"));
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("capture data could not be deleted"));
+    });
+  }
+
   async close() {
     const database = await this.database;
     database.close();
   }
 }
-
