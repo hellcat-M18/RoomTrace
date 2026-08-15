@@ -20,6 +20,7 @@ const ui = {
   instructions: document.querySelector("#instructions"),
   captureHud: document.querySelector("#capture-hud"),
   captureHudStatus: document.querySelector("#capture-hud-status"),
+  coverageOverlay: document.querySelector("#coverage-overlay"),
   coverageMap: document.querySelector("#coverage-map"),
   coverageSummary: document.querySelector("#coverage-summary"),
   finishCapture: document.querySelector("#finish-capture"),
@@ -49,6 +50,9 @@ const state = {
   previousDownloadUrl: null,
   xrSupported: false,
   captureTrail: [],
+  coveragePoints: [],
+  coverageVoxels: new Set(),
+  lastCoverageRenderTime: 0,
 };
 
 function setStatus(message, kind = "info") {
@@ -75,8 +79,8 @@ function updateCounters() {
   if (state.recording) {
     const elapsed = `${Math.max(0, (performance.now() - state.startedAt) / 1000).toFixed(1)} s`;
     ui.elapsed.textContent = elapsed;
-    ui.coverageSummary.textContent = state.captureTrail.length
-      ? `${frames}地点・${elapsed}`
+    ui.coverageSummary.textContent = state.coveragePoints.length
+      ? `緑: 収録済み ${state.coveragePoints.length}点・${frames}枚`
       : `Depthを待っています・${elapsed}`;
   }
 }
@@ -84,7 +88,96 @@ function updateCounters() {
 function setCaptureMode(active) {
   document.body.classList.toggle("capture-mode", active);
   ui.captureHud.hidden = !active;
-  if (active) drawCoverageMap();
+  if (active) {
+    resizeCoverageOverlay();
+    drawCoverageMap();
+  } else {
+    clearCoverageOverlay();
+  }
+}
+
+function resizeCoverageOverlay() {
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.round(window.innerWidth * scale));
+  const height = Math.max(1, Math.round(window.innerHeight * scale));
+  if (ui.coverageOverlay.width !== width || ui.coverageOverlay.height !== height) {
+    ui.coverageOverlay.width = width;
+    ui.coverageOverlay.height = height;
+  }
+  return scale;
+}
+
+function clearCoverageOverlay() {
+  const context = ui.coverageOverlay.getContext("2d");
+  context.clearRect(0, 0, ui.coverageOverlay.width, ui.coverageOverlay.height);
+}
+
+function rememberCoveragePoints(depthMillimeters, depthInfo, cameraToWorld, view) {
+  const projection = view.projectionMatrix;
+  if (!projection?.length || state.coveragePoints.length >= 6000) return;
+  const width = depthInfo.width;
+  const height = depthInfo.height;
+  const fx = Math.abs(Number(projection[0])) * width / 2;
+  const fy = Math.abs(Number(projection[5])) * height / 2;
+  const cx = (1 - Number(projection[8])) * width / 2;
+  const cy = (1 + Number(projection[9])) * height / 2;
+  if (![fx, fy, cx, cy].every(Number.isFinite) || fx <= 0 || fy <= 0) return;
+
+  const columns = 12;
+  const rows = 9;
+  const voxelSize = 0.09;
+  for (let row = 0; row < rows; row += 1) {
+    const y = Math.min(height - 1, Math.floor((row + 0.5) * height / rows));
+    for (let column = 0; column < columns; column += 1) {
+      if (state.coveragePoints.length >= 6000) return;
+      const x = Math.min(width - 1, Math.floor((column + 0.5) * width / columns));
+      const meters = depthMillimeters[y * width + x] / 1000;
+      if (!Number.isFinite(meters) || meters < 0.18 || meters > 8) continue;
+      const cameraX = ((x + 0.5 - cx) / fx) * meters;
+      const cameraY = ((y + 0.5 - cy) / fy) * meters;
+      const cameraZ = -meters;
+      const worldX = cameraToWorld[0] * cameraX + cameraToWorld[4] * cameraY + cameraToWorld[8] * cameraZ + cameraToWorld[12];
+      const worldY = cameraToWorld[1] * cameraX + cameraToWorld[5] * cameraY + cameraToWorld[9] * cameraZ + cameraToWorld[13];
+      const worldZ = cameraToWorld[2] * cameraX + cameraToWorld[6] * cameraY + cameraToWorld[10] * cameraZ + cameraToWorld[14];
+      const voxelKey = `${Math.round(worldX / voxelSize)},${Math.round(worldY / voxelSize)},${Math.round(worldZ / voxelSize)}`;
+      if (state.coverageVoxels.has(voxelKey)) continue;
+      state.coverageVoxels.add(voxelKey);
+      state.coveragePoints.push({ x: worldX, y: worldY, z: worldZ });
+    }
+  }
+}
+
+function renderCoverageOverlay(time, pose, view) {
+  if (time - state.lastCoverageRenderTime < 90) return;
+  state.lastCoverageRenderTime = time;
+  const scale = resizeCoverageOverlay();
+  const canvas = ui.coverageOverlay;
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!state.coveragePoints.length) return;
+  const worldToCamera = pose.transform.inverse?.matrix;
+  const projection = view.projectionMatrix;
+  if (!worldToCamera?.length || !projection?.length) return;
+
+  context.save();
+  context.globalCompositeOperation = "screen";
+  context.fillStyle = "rgb(110 231 183 / 58%)";
+  const stride = Math.max(1, Math.ceil(state.coveragePoints.length / 3600));
+  for (let index = 0; index < state.coveragePoints.length; index += stride) {
+    const point = state.coveragePoints[index];
+    const cameraX = worldToCamera[0] * point.x + worldToCamera[4] * point.y + worldToCamera[8] * point.z + worldToCamera[12];
+    const cameraY = worldToCamera[1] * point.x + worldToCamera[5] * point.y + worldToCamera[9] * point.z + worldToCamera[13];
+    const cameraZ = worldToCamera[2] * point.x + worldToCamera[6] * point.y + worldToCamera[10] * point.z + worldToCamera[14];
+    const clipW = projection[3] * cameraX + projection[7] * cameraY + projection[11] * cameraZ + projection[15];
+    if (!Number.isFinite(clipW) || clipW <= 0) continue;
+    const normalizedX = (projection[0] * cameraX + projection[4] * cameraY + projection[8] * cameraZ + projection[12]) / clipW;
+    const normalizedY = (projection[1] * cameraX + projection[5] * cameraY + projection[9] * cameraZ + projection[13]) / clipW;
+    if (Math.abs(normalizedX) > 1 || Math.abs(normalizedY) > 1) continue;
+    const screenX = (normalizedX * 0.5 + 0.5) * canvas.width;
+    const screenY = (0.5 - normalizedY * 0.5) * canvas.height;
+    context.fillRect(screenX - scale, screenY - scale, scale * 2, scale * 2);
+  }
+  context.restore();
 }
 
 function trailPoint(matrix) {
@@ -372,6 +465,7 @@ async function captureFrame(time, pose, view, depthInfo) {
   state.lastPose = rowMajorPose;
   state.captureTrail.push(trailPoint(rowMajorPose));
   if (state.captureTrail.length > 1200) state.captureTrail.shift();
+  rememberCoveragePoints(depthMillimeters, depthInfo, pose.transform.matrix, view);
   drawCoverageMap();
   updateCounters();
 }
@@ -388,6 +482,7 @@ function onXRFrame(time, frame) {
   const pose = frame.getViewerPose(state.referenceSpace);
   if (!pose || !pose.views.length) return;
   const view = pose.views[0];
+  renderCoverageOverlay(time, pose, view);
   let depthInfo;
   try {
     depthInfo = frame.getDepthInformation(view);
@@ -469,6 +564,9 @@ async function beginXRSession() {
   state.lastStatusTick = 0;
   state.intrinsics = null;
   state.captureTrail = [];
+  state.coveragePoints = [];
+  state.coverageVoxels.clear();
+  state.lastCoverageRenderTime = 0;
   session.addEventListener("end", () => {
     state.session = null;
     if (state.recording) {
@@ -605,6 +703,8 @@ async function cancelCapture() {
   state.session = null;
   state.referenceSpace = null;
   state.captureTrail = [];
+  state.coveragePoints = [];
+  state.coverageVoxels.clear();
   ui.startCapture.disabled = !state.xrSupported;
   setCaptureMode(false);
   setStatus("収録を中止しました。保存前のデータは破棄しました");
@@ -635,6 +735,10 @@ ui.finishCapture.addEventListener("click", () => {
 
 ui.cancelCapture.addEventListener("click", () => {
   cancelCapture();
+});
+
+window.addEventListener("resize", () => {
+  if (state.recording) resizeCoverageOverlay();
 });
 
 window.addEventListener("beforeunload", (event) => {

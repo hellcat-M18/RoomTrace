@@ -110,20 +110,19 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .coverage-card strong, .coverage-card span { display: block; }
 .coverage-card strong { font-size: 0.74rem; }
 .coverage-card span { margin-top: 3px; color: #b6c5d5; font-size: 0.66rem; line-height: 1.35; }
+.coverage-overlay { display: none; position: fixed; z-index: 4; inset: 0; width: 100vw; height: 100dvh; pointer-events: none; }
 
-body.capture-mode { overflow: hidden; background: #000; }
+body.capture-mode { overflow: hidden; background: transparent; }
 body.capture-mode .shell { width: 100%; height: 100dvh; margin: 0; padding: 0; }
 body.capture-mode .shell > :not(.capture-card) { display: none; }
-body.capture-mode .capture-card { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+body.capture-mode .capture-card { display: none; }
 body.capture-mode .capture-card .card-heading,
 body.capture-mode .capture-card .actions,
 body.capture-mode .capture-card .status,
 body.capture-mode .capture-card .error,
 body.capture-mode .capture-card .instructions,
 body.capture-mode .capture-card .download { display: none; }
-body.capture-mode .preview-wrap { position: fixed; z-index: 1; inset: 0; min-height: 100dvh; border: 0; border-radius: 0; background: #000; }
-body.capture-mode video { width: 100%; max-width: none; height: 100%; max-height: none; min-height: 0; object-fit: cover; }
-body.capture-mode .preview-overlay { display: none; }
+body.capture-mode .coverage-overlay { display: block; }
 
 @keyframes pulse {
   50% { opacity: 0.45; transform: scale(0.82); }
