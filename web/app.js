@@ -50,10 +50,14 @@ const state = {
   previousDownloadUrl: null,
   xrSupported: false,
   captureTrail: [],
-  coveragePoints: [],
-  coverageVoxels: new Set(),
+  coveragePatches: [],
+  lastCoveragePatchPose: null,
   lastCoverageRenderTime: 0,
 };
+
+const COVERAGE_MESH_COLUMNS = 16;
+const COVERAGE_MESH_ROWS = 12;
+const MAX_COVERAGE_TRIANGLES_PER_RENDER = 12000;
 
 function setStatus(message, kind = "info") {
   ui.status.textContent = message;
@@ -79,8 +83,8 @@ function updateCounters() {
   if (state.recording) {
     const elapsed = `${Math.max(0, (performance.now() - state.startedAt) / 1000).toFixed(1)} s`;
     ui.elapsed.textContent = elapsed;
-    ui.coverageSummary.textContent = state.coveragePoints.length
-      ? `緑: 収録済み ${state.coveragePoints.length}点・${frames}枚`
+    ui.coverageSummary.textContent = state.coveragePatches.length
+      ? `緑メッシュ: ${state.coveragePatches.length}面・${frames}枚`
       : `Depthを待っています・${elapsed}`;
   }
 }
@@ -112,9 +116,37 @@ function clearCoverageOverlay() {
   context.clearRect(0, 0, ui.coverageOverlay.width, ui.coverageOverlay.height);
 }
 
-function rememberCoveragePoints(depthMillimeters, depthInfo, cameraToWorld, view) {
+function transformPoint(matrix, x, y, z) {
+  return [
+    matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+    matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+    matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
+  ];
+}
+
+function coveragePoseChanged(cameraToWorld) {
+  if (!state.lastCoveragePatchPose) return true;
+  const previous = state.lastCoveragePatchPose;
+  const translation = Math.hypot(
+    cameraToWorld[12] - previous[12],
+    cameraToWorld[13] - previous[13],
+    cameraToWorld[14] - previous[14],
+  );
+  const facingDot = Math.max(-1, Math.min(1,
+    cameraToWorld[8] * previous[8] + cameraToWorld[9] * previous[9] + cameraToWorld[10] * previous[10],
+  ));
+  return translation >= 0.35 || facingDot <= Math.cos((16 * Math.PI) / 180);
+}
+
+function connectedDepths(depths) {
+  const nearest = Math.min(...depths);
+  const farthest = Math.max(...depths);
+  return nearest >= 0.18 && farthest <= 8 && farthest - nearest <= Math.max(0.11, nearest * 0.075);
+}
+
+function rememberCoverageMesh(depthMillimeters, depthInfo, cameraToWorld, view) {
   const projection = view.projectionMatrix;
-  if (!projection?.length || state.coveragePoints.length >= 6000) return;
+  if (!projection?.length || !coveragePoseChanged(cameraToWorld)) return;
   const width = depthInfo.width;
   const height = depthInfo.height;
   const fx = Math.abs(Number(projection[0])) * width / 2;
@@ -123,59 +155,145 @@ function rememberCoveragePoints(depthMillimeters, depthInfo, cameraToWorld, view
   const cy = (1 + Number(projection[9])) * height / 2;
   if (![fx, fy, cx, cy].every(Number.isFinite) || fx <= 0 || fy <= 0) return;
 
-  const columns = 12;
-  const rows = 9;
-  const voxelSize = 0.09;
-  for (let row = 0; row < rows; row += 1) {
-    const y = Math.min(height - 1, Math.floor((row + 0.5) * height / rows));
-    for (let column = 0; column < columns; column += 1) {
-      if (state.coveragePoints.length >= 6000) return;
-      const x = Math.min(width - 1, Math.floor((column + 0.5) * width / columns));
+  const columns = COVERAGE_MESH_COLUMNS;
+  const rows = COVERAGE_MESH_ROWS;
+  const vertexColumns = columns + 1;
+  const vertexRows = rows + 1;
+  const depths = new Float32Array(vertexColumns * vertexRows);
+  const positions = new Float32Array(vertexColumns * vertexRows * 3);
+  const center = [0, 0, 0];
+  let validVertices = 0;
+  for (let row = 0; row < vertexRows; row += 1) {
+    const y = Math.min(height - 1, Math.round(row * (height - 1) / rows));
+    for (let column = 0; column < vertexColumns; column += 1) {
+      const x = Math.min(width - 1, Math.round(column * (width - 1) / columns));
+      const vertexIndex = row * vertexColumns + column;
       const meters = depthMillimeters[y * width + x] / 1000;
       if (!Number.isFinite(meters) || meters < 0.18 || meters > 8) continue;
       const cameraX = ((x + 0.5 - cx) / fx) * meters;
       const cameraY = ((y + 0.5 - cy) / fy) * meters;
       const cameraZ = -meters;
-      const worldX = cameraToWorld[0] * cameraX + cameraToWorld[4] * cameraY + cameraToWorld[8] * cameraZ + cameraToWorld[12];
-      const worldY = cameraToWorld[1] * cameraX + cameraToWorld[5] * cameraY + cameraToWorld[9] * cameraZ + cameraToWorld[13];
-      const worldZ = cameraToWorld[2] * cameraX + cameraToWorld[6] * cameraY + cameraToWorld[10] * cameraZ + cameraToWorld[14];
-      const voxelKey = `${Math.round(worldX / voxelSize)},${Math.round(worldY / voxelSize)},${Math.round(worldZ / voxelSize)}`;
-      if (state.coverageVoxels.has(voxelKey)) continue;
-      state.coverageVoxels.add(voxelKey);
-      state.coveragePoints.push({ x: worldX, y: worldY, z: worldZ });
+      const [worldX, worldY, worldZ] = transformPoint(cameraToWorld, cameraX, cameraY, cameraZ);
+      depths[vertexIndex] = meters;
+      positions[vertexIndex * 3] = worldX;
+      positions[vertexIndex * 3 + 1] = worldY;
+      positions[vertexIndex * 3 + 2] = worldZ;
+      center[0] += worldX;
+      center[1] += worldY;
+      center[2] += worldZ;
+      validVertices += 1;
     }
   }
+  if (validVertices < vertexColumns * 3) return;
+  center[0] /= validVertices;
+  center[1] /= validVertices;
+  center[2] /= validVertices;
+  let radius = 0;
+  for (let index = 0; index < depths.length; index += 1) {
+    if (!depths[index]) continue;
+    radius = Math.max(radius, Math.hypot(
+      positions[index * 3] - center[0],
+      positions[index * 3 + 1] - center[1],
+      positions[index * 3 + 2] - center[2],
+    ));
+  }
+  state.coveragePatches.push({
+    columns,
+    rows,
+    depths,
+    positions,
+    screen: new Float32Array(vertexColumns * vertexRows * 2),
+    visible: new Uint8Array(vertexColumns * vertexRows),
+    center,
+    radius,
+  });
+  state.lastCoveragePatchPose = new Float32Array(cameraToWorld);
+}
+
+function projectCoverageVertex(worldToCamera, projection, positions, offset, canvas) {
+  const [cameraX, cameraY, cameraZ] = transformPoint(worldToCamera, positions[offset], positions[offset + 1], positions[offset + 2]);
+  const clipW = projection[3] * cameraX + projection[7] * cameraY + projection[11] * cameraZ + projection[15];
+  if (!Number.isFinite(clipW) || clipW <= 0) return null;
+  const normalizedX = (projection[0] * cameraX + projection[4] * cameraY + projection[8] * cameraZ + projection[12]) / clipW;
+  const normalizedY = (projection[1] * cameraX + projection[5] * cameraY + projection[9] * cameraZ + projection[13]) / clipW;
+  if (!Number.isFinite(normalizedX) || !Number.isFinite(normalizedY)) return null;
+  return [
+    (normalizedX * 0.5 + 0.5) * canvas.width,
+    (0.5 - normalizedY * 0.5) * canvas.height,
+    normalizedX >= -1.08 && normalizedX <= 1.08 && normalizedY >= -1.08 && normalizedY <= 1.08,
+  ];
+}
+
+function patchMayBeVisible(patch, worldToCamera, projection) {
+  const [cameraX, cameraY, cameraZ] = transformPoint(worldToCamera, ...patch.center);
+  if (cameraZ >= patch.radius) return false;
+  const clipW = projection[3] * cameraX + projection[7] * cameraY + projection[11] * cameraZ + projection[15];
+  if (!Number.isFinite(clipW) || clipW <= 0) return false;
+  const normalizedX = (projection[0] * cameraX + projection[4] * cameraY + projection[8] * cameraZ + projection[12]) / clipW;
+  const normalizedY = (projection[1] * cameraX + projection[5] * cameraY + projection[9] * cameraZ + projection[13]) / clipW;
+  const margin = Math.min(2, Math.max(0.25, patch.radius / Math.max(-cameraZ, 0.1) * 1.4));
+  return Math.abs(normalizedX) <= 1 + margin && Math.abs(normalizedY) <= 1 + margin;
 }
 
 function renderCoverageOverlay(time, pose, view) {
-  if (time - state.lastCoverageRenderTime < 90) return;
+  if (time - state.lastCoverageRenderTime < 120) return;
   state.lastCoverageRenderTime = time;
-  const scale = resizeCoverageOverlay();
+  resizeCoverageOverlay();
   const canvas = ui.coverageOverlay;
   const context = canvas.getContext("2d");
   context.clearRect(0, 0, canvas.width, canvas.height);
-  if (!state.coveragePoints.length) return;
+  if (!state.coveragePatches.length) return;
   const worldToCamera = pose.transform.inverse?.matrix;
   const projection = view.projectionMatrix;
   if (!worldToCamera?.length || !projection?.length) return;
 
   context.save();
   context.globalCompositeOperation = "screen";
-  context.fillStyle = "rgb(110 231 183 / 58%)";
-  const stride = Math.max(1, Math.ceil(state.coveragePoints.length / 3600));
-  for (let index = 0; index < state.coveragePoints.length; index += stride) {
-    const point = state.coveragePoints[index];
-    const cameraX = worldToCamera[0] * point.x + worldToCamera[4] * point.y + worldToCamera[8] * point.z + worldToCamera[12];
-    const cameraY = worldToCamera[1] * point.x + worldToCamera[5] * point.y + worldToCamera[9] * point.z + worldToCamera[13];
-    const cameraZ = worldToCamera[2] * point.x + worldToCamera[6] * point.y + worldToCamera[10] * point.z + worldToCamera[14];
-    const clipW = projection[3] * cameraX + projection[7] * cameraY + projection[11] * cameraZ + projection[15];
-    if (!Number.isFinite(clipW) || clipW <= 0) continue;
-    const normalizedX = (projection[0] * cameraX + projection[4] * cameraY + projection[8] * cameraZ + projection[12]) / clipW;
-    const normalizedY = (projection[1] * cameraX + projection[5] * cameraY + projection[9] * cameraZ + projection[13]) / clipW;
-    if (Math.abs(normalizedX) > 1 || Math.abs(normalizedY) > 1) continue;
-    const screenX = (normalizedX * 0.5 + 0.5) * canvas.width;
-    const screenY = (0.5 - normalizedY * 0.5) * canvas.height;
-    context.fillRect(screenX - scale, screenY - scale, scale * 2, scale * 2);
+  context.fillStyle = "rgb(74 222 128 / 26%)";
+  let triangles = 0;
+  for (let patchIndex = state.coveragePatches.length - 1; patchIndex >= 0; patchIndex -= 1) {
+    const patch = state.coveragePatches[patchIndex];
+    if (!patchMayBeVisible(patch, worldToCamera, projection)) continue;
+    const vertexColumns = patch.columns + 1;
+    for (let vertex = 0; vertex < patch.depths.length; vertex += 1) {
+      const projectionResult = patch.depths[vertex]
+        ? projectCoverageVertex(worldToCamera, projection, patch.positions, vertex * 3, canvas)
+        : null;
+      patch.visible[vertex] = projectionResult?.[2] ? 1 : 0;
+      patch.screen[vertex * 2] = projectionResult?.[0] || 0;
+      patch.screen[vertex * 2 + 1] = projectionResult?.[1] || 0;
+    }
+    context.beginPath();
+    for (let row = 0; row < patch.rows; row += 1) {
+      for (let column = 0; column < patch.columns; column += 1) {
+        if (triangles >= MAX_COVERAGE_TRIANGLES_PER_RENDER) break;
+        const topLeft = row * vertexColumns + column;
+        const topRight = topLeft + 1;
+        const bottomLeft = topLeft + vertexColumns;
+        const bottomRight = bottomLeft + 1;
+        const quadDepths = [patch.depths[topLeft], patch.depths[topRight], patch.depths[bottomLeft], patch.depths[bottomRight]];
+        if (!connectedDepths(quadDepths)) continue;
+        const firstTriangleVisible = patch.visible[topLeft] && patch.visible[topRight] && patch.visible[bottomLeft];
+        const secondTriangleVisible = patch.visible[topRight] && patch.visible[bottomRight] && patch.visible[bottomLeft];
+        if (firstTriangleVisible) {
+          context.moveTo(patch.screen[topLeft * 2], patch.screen[topLeft * 2 + 1]);
+          context.lineTo(patch.screen[topRight * 2], patch.screen[topRight * 2 + 1]);
+          context.lineTo(patch.screen[bottomLeft * 2], patch.screen[bottomLeft * 2 + 1]);
+          context.closePath();
+          triangles += 1;
+        }
+        if (secondTriangleVisible && triangles < MAX_COVERAGE_TRIANGLES_PER_RENDER) {
+          context.moveTo(patch.screen[topRight * 2], patch.screen[topRight * 2 + 1]);
+          context.lineTo(patch.screen[bottomRight * 2], patch.screen[bottomRight * 2 + 1]);
+          context.lineTo(patch.screen[bottomLeft * 2], patch.screen[bottomLeft * 2 + 1]);
+          context.closePath();
+          triangles += 1;
+        }
+      }
+      if (triangles >= MAX_COVERAGE_TRIANGLES_PER_RENDER) break;
+    }
+    context.fill();
+    if (triangles >= MAX_COVERAGE_TRIANGLES_PER_RENDER) break;
   }
   context.restore();
 }
@@ -465,7 +583,7 @@ async function captureFrame(time, pose, view, depthInfo) {
   state.lastPose = rowMajorPose;
   state.captureTrail.push(trailPoint(rowMajorPose));
   if (state.captureTrail.length > 1200) state.captureTrail.shift();
-  rememberCoveragePoints(depthMillimeters, depthInfo, pose.transform.matrix, view);
+  rememberCoverageMesh(depthMillimeters, depthInfo, pose.transform.matrix, view);
   drawCoverageMap();
   updateCounters();
 }
@@ -564,8 +682,8 @@ async function beginXRSession() {
   state.lastStatusTick = 0;
   state.intrinsics = null;
   state.captureTrail = [];
-  state.coveragePoints = [];
-  state.coverageVoxels.clear();
+  state.coveragePatches = [];
+  state.lastCoveragePatchPose = null;
   state.lastCoverageRenderTime = 0;
   session.addEventListener("end", () => {
     state.session = null;
@@ -703,8 +821,8 @@ async function cancelCapture() {
   state.session = null;
   state.referenceSpace = null;
   state.captureTrail = [];
-  state.coveragePoints = [];
-  state.coverageVoxels.clear();
+  state.coveragePatches = [];
+  state.lastCoveragePatchPose = null;
   ui.startCapture.disabled = !state.xrSupported;
   setCaptureMode(false);
   setStatus("収録を中止しました。保存前のデータは破棄しました");
