@@ -135,20 +135,28 @@ def launch(initial_capture: Path | None = None) -> None:
         choose_output_button.configure(state="disabled")
         open_output_button.configure(state="disabled")
         open_blender_button.configure(state="disabled")
-        progress.start(12)
-        status_var.set("処理中…撮影枚数によって数分かかることがあります")
+        progress.configure(value=0)
+        status_var.set("処理を開始しています…")
+
+        def update_progress(message: str, fraction: float) -> None:
+            def apply() -> None:
+                progress.configure(value=round(fraction * 100))
+                status_var.set(f"{message}（{round(fraction * 100)}%）")
+
+            root.after(0, apply)
 
         def work() -> None:
             try:
                 result = process_capture(
                     capture,
                     ProcessOptions(output_dir=output, verify_checksums=True, force=False),
+                    progress=update_progress,
                 )
 
                 def finished() -> None:
                     nonlocal last_output
                     last_output = result.output_dir
-                    progress.stop()
+                    progress.configure(value=100)
                     choose_capture_button.configure(state="normal")
                     choose_output_button.configure(state="normal")
                     process_button.configure(state="normal")
@@ -168,7 +176,7 @@ def launch(initial_capture: Path | None = None) -> None:
             except Exception as error:
 
                 def failed() -> None:
-                    progress.stop()
+                    progress.configure(value=0)
                     choose_capture_button.configure(state="normal")
                     choose_output_button.configure(state="normal")
                     process_button.configure(state="normal")
@@ -237,7 +245,7 @@ def launch(initial_capture: Path | None = None) -> None:
         state="normal" if initial_capture else "disabled",
     )
     process_button.grid(row=5, column=1, padx=8, pady=12, sticky="w")
-    progress = ttk.Progressbar(root, mode="indeterminate")
+    progress = ttk.Progressbar(root, mode="determinate", maximum=100)
     progress.grid(row=6, column=0, columnspan=3, padx=18, pady=(0, 10), sticky="ew")
     ttk.Label(root, textvariable=status_var, wraplength=740).grid(
         row=7, column=0, columnspan=3, padx=18, pady=8, sticky="w"
