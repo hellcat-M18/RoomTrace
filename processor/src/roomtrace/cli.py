@@ -67,6 +67,16 @@ def main(argv: list[str] | None = None) -> int:
             launch(Path(args.capture).expanduser() if args.capture else None)
             return 0
         if args.command == "process":
+            last_progress = -1
+
+            def show_progress(message: str, fraction: float) -> None:
+                nonlocal last_progress
+                percent = int(round(fraction * 100))
+                if percent == last_progress and percent not in {0, 100}:
+                    return
+                last_progress = percent
+                print(f"\r[{percent:3d}%] {message}", end="", file=sys.stderr, flush=True)
+
             result = process_capture(
                 args.capture,
                 ProcessOptions(
@@ -82,7 +92,9 @@ def main(argv: list[str] | None = None) -> int:
                     verify_checksums=args.verify_checksums,
                     force=args.force,
                 ),
+                progress=show_progress,
             )
+            print(file=sys.stderr)
             print(json.dumps({"output": str(result.output_dir), **result.summary}, ensure_ascii=False, indent=2))
             return 0
         return 1
