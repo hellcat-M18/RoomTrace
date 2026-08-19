@@ -10,8 +10,12 @@ by the truncation band.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+import os
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -31,6 +35,7 @@ class FusionOptions:
     max_depth_m: float = 8.0
     clean_voxel_m: float = 0.04
     refine_poses: bool = True
+    preprocess_workers: int = 0
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,27 @@ class FusionResult:
     frame_errors: list[dict[str, str | int]]
     icp_refined_frames: int = 0
     method: str = "open3d_scalable_tsdf"
+    preprocess_workers: int = 1
+    timings_seconds: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PreparedFrame:
+    frame: FrameRecord
+    depth_image: np.ndarray
+    intrinsic: tuple[int, int, float, float, float, float]
+    camera_to_world: np.ndarray
+    rgb: np.ndarray | None
+    preparation_seconds: float
+
+
+@dataclass(frozen=True)
+class _FusionInput:
+    index: int
+    prepared: _PreparedFrame
+    intrinsic: object
+    cloud: object
+    icp_future: Future[tuple[np.ndarray | None, float]] | None
 
 
 def fuse_capture(
@@ -51,6 +77,9 @@ def fuse_capture(
     progress: ProgressCallback | None = None,
 ) -> FusionResult:
     """Fuse calibrated frames into a single mesh using Open3D ScalableTSDF."""
+    fusion_started = perf_counter()
+    _progress(progress, "Open3Dを読み込んでいます", 0.245)
+    open3d_load_started = perf_counter()
     try:
         import open3d as o3d
     except ImportError as exc:  # pragma: no cover - depends on installation
@@ -58,9 +87,12 @@ def fuse_capture(
             "Open3D is required for reconstruction. Re-run Setup-RoomTrace.ps1 "
             "or install the processor package with its Open3D dependency."
         ) from exc
+    open3d_load_seconds = perf_counter() - open3d_load_started
 
     browser_capture = capture.manifest.get("device", {}).get("source") == "browser-spa"
     registered_rgb = bool(capture.capabilities.get("rgb_registered_to_depth", not browser_capture))
+    _progress(progress, "TSDFボリュームを初期化しています", 0.25)
+    volume_started = perf_counter()
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=max(0.005, float(options.voxel_size_m)),
         sdf_trunc=max(float(options.sdf_trunc_m), float(options.voxel_size_m) * 2.0),
@@ -70,90 +102,232 @@ def fuse_capture(
             else o3d.pipelines.integration.TSDFVolumeColorType.NoColor
         ),
     )
+    volume_initialization_seconds = perf_counter() - volume_started
 
     integrated: list[FrameRecord] = []
     errors: list[dict[str, str | int]] = []
-    previous_cloud = None
-    previous_pose = None
+    last_cloud = None
+    last_raw_pose = None
+    previous_integrated_pose = None
     icp_refined_frames = 0
+    preparation_worker_seconds = 0.0
+    preparation_wait_seconds = 0.0
+    pointcloud_seconds = 0.0
+    icp_seconds = 0.0
+    integration_seconds = 0.0
+    worker_count = _preprocess_worker_count(options.preprocess_workers, len(frames))
+    icp_worker_count = max(1, min(4, worker_count))
+    ready_limit = max(2, icp_worker_count * 2)
+    ready: deque[_FusionInput] = deque()
     total = max(1, len(frames))
-    for index, frame in enumerate(frames, start=1):
-        if not frame.depth_path or not capture.exists(frame.depth_path):
-            errors.append({"frame_id": frame.frame_id, "error": "depth_missing"})
-            continue
-        try:
-            depth_mm = read_depth(capture, frame)
-            confidence = read_confidence(capture, frame, depth_mm.shape)
-            depth_image, intrinsic, camera_to_world = _open3d_frame(
-                depth_mm,
-                confidence,
-                capture.intrinsics,
-                frame,
-                confidence_threshold=options.confidence_threshold,
-                max_depth_m=options.max_depth_m,
-                o3d=o3d,
-            )
-            if depth_image is None:
-                errors.append({"frame_id": frame.frame_id, "error": "no_valid_depth"})
-                continue
-            if options.refine_poses and previous_cloud is not None and previous_pose is not None:
-                cloud = o3d.geometry.PointCloud.create_from_depth_image(
-                    o3d.geometry.Image(depth_image),
-                    intrinsic,
-                    depth_scale=1000.0,
-                    depth_trunc=float(options.max_depth_m),
-                    stride=2,
-                ).voxel_down_sample(max(0.025, float(options.voxel_size_m) * 2.0))
-                refined = _refine_adjacent_pose(o3d, cloud, previous_cloud, camera_to_world, previous_pose)
-                if refined is not None:
-                    camera_to_world = refined
+    _progress(progress, f"深度フレームを並列準備しています（{worker_count}スレッド）", 0.255)
+    icp_executor = ThreadPoolExecutor(max_workers=icp_worker_count, thread_name_prefix="RoomTraceICP")
+
+    def integrate_one(item: _FusionInput) -> None:
+        nonlocal previous_integrated_pose, icp_refined_frames, icp_seconds, integration_seconds
+        prepared = item.prepared
+        camera_to_world = prepared.camera_to_world.copy()
+        if item.icp_future is not None:
+            try:
+                relative_pose, elapsed = item.icp_future.result()
+                icp_seconds += elapsed
+                if relative_pose is not None and previous_integrated_pose is not None:
+                    camera_to_world = previous_integrated_pose @ relative_pose
                     icp_refined_frames += 1
-            else:
+            except Exception as exc:
+                errors.append({"frame_id": prepared.frame.frame_id, "error": f"icp_failed: {exc}"})
+        if registered_rgb:
+            if prepared.rgb is None:
+                raise ValueError("registered_rgb_missing")
+            color_image = o3d.geometry.Image(prepared.rgb)
+        else:
+            # WebXR's getUserMedia image has no calibrated relation to its
+            # depth sensor.  Supplying it would paint the mesh incorrectly.
+            color_image = o3d.geometry.Image(np.zeros((*prepared.depth_image.shape, 3), dtype=np.uint8))
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_image,
+            o3d.geometry.Image(prepared.depth_image),
+            depth_scale=1000.0,
+            depth_trunc=float(options.max_depth_m),
+            convert_rgb_to_intensity=False,
+        )
+        integration_started = perf_counter()
+        volume.integrate(rgbd, item.intrinsic, np.linalg.inv(camera_to_world))
+        integration_seconds += perf_counter() - integration_started
+        integrated.append(prepared.frame)
+        previous_integrated_pose = camera_to_world
+        _progress(
+            progress,
+            f"ICP・TSDF処理中（{item.index}/{len(frames)}）",
+            0.26 + 0.52 * item.index / total,
+        )
+
+    try:
+        for index, frame, future in _prepare_frames(
+            capture,
+            frames,
+            options,
+            registered_rgb=registered_rgb,
+            workers=worker_count,
+        ):
+            wait_started = perf_counter()
+            wait_recorded = False
+            try:
+                prepared = future.result()
+                preparation_wait_seconds += perf_counter() - wait_started
+                wait_recorded = True
+                preparation_worker_seconds += prepared.preparation_seconds
+                width, height, fx, fy, cx, cy = prepared.intrinsic
+                intrinsic = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
+                pointcloud_started = perf_counter()
                 cloud = o3d.geometry.PointCloud.create_from_depth_image(
-                    o3d.geometry.Image(depth_image),
+                    o3d.geometry.Image(prepared.depth_image),
                     intrinsic,
                     depth_scale=1000.0,
                     depth_trunc=float(options.max_depth_m),
                     stride=2,
                 ).voxel_down_sample(max(0.025, float(options.voxel_size_m) * 2.0))
-            if registered_rgb:
-                rgb = _registered_color(read_rgb(capture, frame), depth_image.shape)
-                color_image = o3d.geometry.Image(rgb)
-            else:
-                # WebXR's getUserMedia image has no calibrated relation to its
-                # depth sensor.  Supplying it would paint the mesh incorrectly.
-                color_image = o3d.geometry.Image(np.zeros((*depth_image.shape, 3), dtype=np.uint8))
-            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                color_image,
-                o3d.geometry.Image(depth_image),
-                depth_scale=1000.0,
-                depth_trunc=float(options.max_depth_m),
-                convert_rgb_to_intensity=False,
-            )
-            volume.integrate(rgbd, intrinsic, np.linalg.inv(camera_to_world))
-            integrated.append(frame)
-            previous_cloud = cloud
-            previous_pose = camera_to_world
-        except Exception as exc:
-            errors.append({"frame_id": frame.frame_id, "error": str(exc)})
-        _progress(progress, f"TSDFへ深度を融合しています（{index}/{len(frames)}）", 0.26 + 0.52 * index / total)
+                if options.refine_poses:
+                    cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.12, max_nn=30))
+                pointcloud_seconds += perf_counter() - pointcloud_started
+                icp_future = None
+                if options.refine_poses and last_cloud is not None and last_raw_pose is not None:
+                    icp_future = icp_executor.submit(
+                        _timed_adjacent_icp,
+                        o3d,
+                        cloud,
+                        last_cloud,
+                        prepared.camera_to_world,
+                        last_raw_pose,
+                    )
+                ready.append(_FusionInput(index, prepared, intrinsic, cloud, icp_future))
+                last_cloud = cloud
+                last_raw_pose = prepared.camera_to_world
+                if len(ready) >= ready_limit:
+                    integrate_one(ready.popleft())
+            except Exception as exc:
+                if not wait_recorded:
+                    preparation_wait_seconds += perf_counter() - wait_started
+                errors.append({"frame_id": frame.frame_id, "error": str(exc)})
+                _progress(progress, f"無効フレームを除外しました（{index}/{len(frames)}）", 0.26 + 0.52 * index / total)
+        while ready:
+            integrate_one(ready.popleft())
+    finally:
+        icp_executor.shutdown(wait=True, cancel_futures=True)
 
     if len(integrated) < 2:
         raise ProcessingError("Open3D TSDF integration needs at least two calibrated depth frames")
     _progress(progress, "TSDFから連続メッシュを抽出しています", 0.80)
+    extraction_started = perf_counter()
     mesh = volume.extract_triangle_mesh()
+    extraction_seconds = perf_counter() - extraction_started
+    cleanup_started = perf_counter()
     _clean_open3d_mesh(mesh)
     raw = _mesh_data(mesh, with_colors=registered_rgb)
     if len(raw.indices) == 0:
         raise ProcessingError("TSDF fusion produced no surfaces; move slowly and keep walls/floor in range")
     _progress(progress, "軽量版メッシュを最適化しています", 0.86)
     clean = _clean_mesh(mesh, clean_voxel_m=options.clean_voxel_m, with_colors=registered_rgb)
+    cleanup_seconds = perf_counter() - cleanup_started
     if len(clean.indices) == 0:
         clean = raw
-    return FusionResult(raw, clean, integrated, errors, icp_refined_frames)
+    timings = {
+        "fusion_total": perf_counter() - fusion_started,
+        "preprocess_worker_sum": preparation_worker_seconds,
+        "preprocess_main_wait": preparation_wait_seconds,
+        "pointcloud": pointcloud_seconds,
+        "open3d_load": open3d_load_seconds,
+        "tsdf_initialization": volume_initialization_seconds,
+        "icp_worker_sum": icp_seconds,
+        "tsdf_integration": integration_seconds,
+        "mesh_extraction": extraction_seconds,
+        "mesh_cleanup": cleanup_seconds,
+    }
+    return FusionResult(
+        raw,
+        clean,
+        integrated,
+        errors,
+        icp_refined_frames,
+        preprocess_workers=worker_count,
+        timings_seconds={key: round(value, 3) for key, value in timings.items()},
+    )
 
 
-def _open3d_frame(
+def _prepare_frames(
+    capture: Capture,
+    frames: list[FrameRecord],
+    options: FusionOptions,
+    *,
+    registered_rgb: bool,
+    workers: int,
+) -> Iterator[tuple[int, FrameRecord, Future[_PreparedFrame]]]:
+    """Yield a bounded, ordered stream of concurrently prepared frames."""
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="RoomTraceDepth")
+    pending: deque[tuple[int, FrameRecord, Future[_PreparedFrame]]] = deque()
+    source = iter(enumerate(frames, start=1))
+
+    def submit_next() -> bool:
+        try:
+            index, frame = next(source)
+        except StopIteration:
+            return False
+        future = executor.submit(
+            _prepare_frame,
+            capture,
+            frame,
+            options,
+            registered_rgb=registered_rgb,
+        )
+        pending.append((index, frame, future))
+        return True
+
+    for _ in range(min(len(frames), workers * 2)):
+        submit_next()
+    try:
+        while pending:
+            item = pending.popleft()
+            submit_next()
+            yield item
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _prepare_frame(
+    capture: Capture,
+    frame: FrameRecord,
+    options: FusionOptions,
+    *,
+    registered_rgb: bool,
+) -> _PreparedFrame:
+    started = perf_counter()
+    if not frame.depth_path or not capture.exists(frame.depth_path):
+        raise ValueError("depth_missing")
+    depth_mm = read_depth(capture, frame)
+    confidence = read_confidence(capture, frame, depth_mm.shape)
+    prepared = _prepare_depth_frame(
+        depth_mm,
+        confidence,
+        capture.intrinsics,
+        frame,
+        confidence_threshold=options.confidence_threshold,
+        max_depth_m=options.max_depth_m,
+    )
+    if prepared is None:
+        raise ValueError("no_valid_depth")
+    depth_image, intrinsic, camera_to_world = prepared
+    rgb = _registered_color(read_rgb(capture, frame), depth_image.shape) if registered_rgb else None
+    return _PreparedFrame(frame, depth_image, intrinsic, camera_to_world, rgb, perf_counter() - started)
+
+
+def _preprocess_worker_count(requested: int, frame_count: int) -> int:
+    if requested > 0:
+        return max(1, min(int(requested), max(1, frame_count)))
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(8, max(2, cpu_count // 2), max(1, frame_count)))
+
+
+def _prepare_depth_frame(
     depth_mm: np.ndarray,
     confidence: np.ndarray,
     fallback_intrinsics: Intrinsics,
@@ -161,16 +335,15 @@ def _open3d_frame(
     *,
     confidence_threshold: int,
     max_depth_m: float,
-    o3d: object,
-) -> tuple[np.ndarray | None, object, np.ndarray]:
+) -> tuple[np.ndarray, tuple[int, int, float, float, float, float], np.ndarray] | None:
     depth = np.asarray(depth_mm, dtype=np.uint16)
     if depth.ndim != 2 or not depth.size:
-        return None, None, np.eye(4)
+        return None
     if confidence.shape != depth.shape:
         confidence = _resize_nearest(confidence, depth.shape)
     valid = (depth > 0) & (depth.astype(np.float32) <= max_depth_m * 1000.0) & (confidence >= confidence_threshold)
     if not np.any(valid):
-        return None, None, np.eye(4)
+        return None
     projection = _matrix4(frame.metadata.get("depth_projection_matrix"))
     view_from_depth = _inverse_matrix4(frame.metadata.get("norm_depth_buffer_from_norm_view"))
     pose = _matrix4(frame.metadata.get("depth_pose_c2w"))
@@ -191,15 +364,33 @@ def _open3d_frame(
         intrinsics = fallback_intrinsics.scaled(w, h)
         fx, fy, cx, cy = intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy
     if fx <= 1e-5 or fy <= 1e-5 or not np.any(rectified):
-        return None, None, np.eye(4)
-    intrinsic = o3d.camera.PinholeCameraIntrinsic(w, h, float(fx), float(fy), float(cx), float(cy))
+        return None
     # WebXR: +X right, +Y up, camera looks down -Z.
     # Open3D: +X right, +Y down, camera looks down +Z.
     open3d_to_webxr = np.diag([1.0, -1.0, -1.0, 1.0])
+    intrinsic = (int(w), int(h), float(fx), float(fy), float(cx), float(cy))
     return rectified, intrinsic, pose @ open3d_to_webxr
 
 
-def _refine_adjacent_pose(o3d: object, source: object, target: object, source_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray | None:
+def _timed_adjacent_icp(
+    o3d: object,
+    source: object,
+    target: object,
+    source_pose: np.ndarray,
+    target_pose: np.ndarray,
+) -> tuple[np.ndarray | None, float]:
+    started = perf_counter()
+    relative_pose = _refine_adjacent_transform(o3d, source, target, source_pose, target_pose)
+    return relative_pose, perf_counter() - started
+
+
+def _refine_adjacent_transform(
+    o3d: object,
+    source: object,
+    target: object,
+    source_pose: np.ndarray,
+    target_pose: np.ndarray,
+) -> np.ndarray | None:
     """Use conservative local ICP to correct small tracking drift only.
 
     The WebXR pose remains the prior.  Large corrections are deliberately
@@ -208,7 +399,6 @@ def _refine_adjacent_pose(o3d: object, source: object, target: object, source_po
     """
     if len(source.points) < 80 or len(target.points) < 80:
         return None
-    target.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.12, max_nn=30))
     initial = np.linalg.inv(target_pose) @ source_pose
     result = o3d.pipelines.registration.registration_icp(
         source,
@@ -225,7 +415,7 @@ def _refine_adjacent_pose(o3d: object, source: object, target: object, source_po
     angle = _rotation_angle_deg(correction[:3, :3])
     if shift > 0.10 or angle > 6.0:
         return None
-    return target_pose @ result.transformation
+    return result.transformation
 
 
 def _rotation_angle_deg(rotation: np.ndarray) -> float:
@@ -249,14 +439,14 @@ def _rectify_depth_to_view(depth: np.ndarray, valid: np.ndarray, view_from_depth
     ox = np.clip(np.floor(view_x[inside] * w).astype(np.int32), 0, w - 1)
     oy = np.clip(np.floor(view_y[inside] * h).astype(np.int32), 0, h - 1)
     values = depth[y[inside], x[inside]]
-    flat = output.reshape(-1)
     targets = oy * w + ox
-    # Keeping the nearest surface protects the TSDF from depth discontinuities.
-    for target, value in zip(targets, values):
-        current = flat[target]
-        if current == 0 or value < current:
-            flat[target] = value
-    return output
+    # NumPy executes the collision reduction in compiled code.  The old Python
+    # loop processed every valid texel on one core and dominated long scans.
+    empty = np.iinfo(np.uint32).max
+    flat = np.full(h * w, empty, dtype=np.uint32)
+    np.minimum.at(flat, targets, values.astype(np.uint32, copy=False))
+    flat[flat == empty] = 0
+    return flat.astype(np.uint16, copy=False).reshape((h, w))
 
 
 def _registered_color(rgb: np.ndarray, depth_shape: tuple[int, int]) -> np.ndarray:

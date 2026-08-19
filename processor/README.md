@@ -26,3 +26,12 @@ The normal output is:
 Open the GLB files directly in Blender with **File → Import → glTF 2.0**. The processor maps the ARCore Y-up capture coordinates to Blender X/Y/Z, places the estimated floor at Z=0, and embeds texture images in the GLB.
 
 Open3D is a normal dependency of the built-in processor. CUDA is optional: the supported default is CPU processing on Windows.
+
+The processor automatically uses multiple CPU workers for RGB/depth decoding,
+depth rectification, frame-quality scoring, and adjacent-frame ICP. To cap CPU
+usage or compare performance, pass `--workers N`; `--workers 1` forces the
+serial path and the default `--workers 0` chooses a safe value automatically.
+`processing_manifest.json` records the selected worker count and stage timings
+under `timings_seconds`, including Open3D loading, quality selection,
+preprocessing wait, aggregate ICP worker time, TSDF integration, and mesh
+cleanup. Worker sums may overlap and therefore should not be added together.

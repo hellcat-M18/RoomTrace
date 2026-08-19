@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
 import numpy as np
@@ -77,9 +79,29 @@ def _quality_reason(blur: float, brightness: float, clipped: float) -> str:
     return ",".join(reasons) or "low_quality"
 
 
-def score_frames(capture: Capture, frames: Iterable[FrameRecord] | None = None) -> dict[int, FrameQuality]:
+def score_frames(
+    capture: Capture,
+    frames: Iterable[FrameRecord] | None = None,
+    *,
+    workers: int = 0,
+) -> dict[int, FrameQuality]:
     selected = list(frames if frames is not None else capture.frames)
-    return {frame.frame_id: score_frame(capture, frame) for frame in selected}
+    if not selected:
+        return {}
+    worker_count = _quality_worker_count(workers, len(selected))
+    if worker_count == 1:
+        results = [score_frame(capture, frame) for frame in selected]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="RoomTraceQuality") as executor:
+            results = list(executor.map(lambda frame: score_frame(capture, frame), selected))
+    return {quality.frame_id: quality for quality in results}
+
+
+def _quality_worker_count(requested: int, frame_count: int) -> int:
+    if requested > 0:
+        return max(1, min(int(requested), frame_count))
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(8, max(2, cpu_count // 2), frame_count))
 
 
 def select_keyframes(
@@ -120,4 +142,3 @@ def rotation_angle_deg(rotation: np.ndarray) -> float:
     trace = float(np.trace(rotation))
     cosine = max(-1.0, min(1.0, (trace - 1.0) / 2.0))
     return math.degrees(math.acos(cosine))
-

@@ -10,11 +10,28 @@ from pathlib import Path
 import numpy as np
 
 from roomtrace.io import load_capture, validate_capture
+from roomtrace.fusion import _rectify_depth_to_view
 from roomtrace.pipeline import ProcessOptions, process_capture
 from roomtrace.sample import create_sample_capture
 
 
 class RoomTraceEndToEndTests(unittest.TestCase):
+    def test_depth_rectification_keeps_nearest_collision_without_python_loop(self) -> None:
+        depth = np.array([[1000, 900], [800, 700]], dtype=np.uint16)
+        valid = np.ones((2, 2), dtype=bool)
+        collapse_to_first_pixel = np.array(
+            [[0.0, 0.0, 0.0, 0.1], [0.0, 0.0, 0.0, 0.1], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            dtype=float,
+        )
+        result = _rectify_depth_to_view(depth, valid, collapse_to_first_pixel)
+        self.assertEqual(int(result[0, 0]), 700)
+        self.assertEqual(int(np.count_nonzero(result)), 1)
+
+    def test_identity_depth_rectification_preserves_pixels(self) -> None:
+        depth = np.array([[1000, 900], [800, 700]], dtype=np.uint16)
+        result = _rectify_depth_to_view(depth, depth > 0, np.eye(4))
+        np.testing.assert_array_equal(result, depth)
+
     def test_sample_capture_inspect_process_and_glb(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -32,6 +49,8 @@ class RoomTraceEndToEndTests(unittest.TestCase):
             self.assertGreater(result.summary["raw_triangles"], 0)
             self.assertGreater(result.summary["clean_triangles"], 0)
             self.assertEqual(result.summary["reconstruction"], "open3d_scalable_tsdf")
+            self.assertGreaterEqual(result.summary["preprocess_workers"], 1)
+            self.assertIn("tsdf_integration", result.summary["timings_seconds"])
             self.assertGreater(result.summary["scale_factor"], 1.0)
             width = result.summary["bounds_max_m"][0] - result.summary["bounds_min_m"][0]
             self.assertAlmostEqual(width, 5.0, places=3)
@@ -53,6 +72,23 @@ class RoomTraceEndToEndTests(unittest.TestCase):
                 self.assertEqual(len(loaded.frames), 3)
             result = process_capture(archive, ProcessOptions(output_dir=root / "zip-output", depth_step=6))
             self.assertTrue(result.raw_glb.exists())
+
+    def test_parallel_processing_preserves_reconstruction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = create_sample_capture(root / "capture", frame_count=8)
+            serial = process_capture(
+                capture,
+                ProcessOptions(output_dir=root / "serial", max_frames=8, preprocess_workers=1),
+            )
+            parallel = process_capture(
+                capture,
+                ProcessOptions(output_dir=root / "parallel", max_frames=8, preprocess_workers=4),
+            )
+            self.assertEqual(parallel.summary["raw_vertices"], serial.summary["raw_vertices"])
+            self.assertEqual(parallel.summary["raw_triangles"], serial.summary["raw_triangles"])
+            self.assertEqual(parallel.summary["icp_refined_frames"], serial.summary["icp_refined_frames"])
+            self.assertEqual(parallel.summary["preprocess_workers"], 4)
 
     def test_legacy_browser_capture_is_rejected_before_meshing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

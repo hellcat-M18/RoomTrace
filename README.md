@@ -57,6 +57,10 @@ roomtrace process ..\examples\sample.roomcap --output ..\examples\sample-output 
 roomtrace gui
 ```
 
+CPU並列数は通常自動設定される。負荷を抑えたい場合は `roomtrace process`
+に `--workers 1` などを追加できる。変換後の `processing_manifest.json`
+には工程別の `timings_seconds` が記録され、実データで遅い工程を切り分けられる。
+
 The processor writes self-contained fused GLBs, so the primary files do not depend on the source folder. Browser WebXR scans are geometry-first because their regular camera image is not registered to the depth sensor; use **File → Import → glTF 2.0** and import `room_reference_clean.glb` first, then `room_reference_raw.glb` for detail.
 
 ## Android build

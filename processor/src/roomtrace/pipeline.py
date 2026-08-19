@@ -4,6 +4,7 @@ import csv
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 import numpy as np
@@ -33,6 +34,7 @@ class ProcessOptions:
     tsdf_voxel_m: float = 0.025
     tsdf_trunc_m: float = 0.10
     refine_poses: bool = True
+    preprocess_workers: int = 0
     reference_width_m: float | None = None
     reference_depth_m: float | None = None
     loop_closure: bool = False
@@ -57,6 +59,7 @@ def inspect_capture(path: str | Path, *, verify_checksums: bool = False, inspect
 
 
 def process_capture(path: str | Path, options: ProcessOptions, *, progress: ProgressCallback | None = None) -> ProcessResult:
+    process_started = perf_counter()
     _report_progress(progress, "撮影データを読み込んでいます", 0.02)
     output_dir = Path(options.output_dir).expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()) and not options.force:
@@ -65,6 +68,7 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
     if options.force:
         _remove_previous_generated_outputs(output_dir)
     with load_capture(path) as capture:
+        validation_started = perf_counter()
         _report_progress(progress, "撮影データを検証しています", 0.10)
         validation = validate_capture(capture, verify_checksums=options.verify_checksums, inspect_images=True)
         if validation.errors:
@@ -72,12 +76,15 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
             raise ProcessingError(f"capture validation failed: {messages}")
         if validation.depth_frames == 0:
             raise ProcessingError("no depth frames are available; RoomTrace needs Raw Depth or an imported MVS depth source to produce a mesh")
-        _report_progress(progress, "画像品質を確認しています", 0.18)
-        qualities = score_frames(capture)
+        validation_seconds = perf_counter() - validation_started
+        quality_started = perf_counter()
+        _report_progress(progress, "画像品質を並列確認しています", 0.18)
+        qualities = score_frames(capture, workers=options.preprocess_workers)
         selected = select_keyframes(capture.frames, qualities, max_frames=options.max_frames)
+        quality_selection_seconds = perf_counter() - quality_started
         if len(selected) < 2:
             raise ProcessingError("fewer than two usable keyframes remain after quality filtering")
-        _report_progress(progress, f"使用フレームを選んでいます（{len(selected)}枚）", 0.24)
+        _report_progress(progress, f"使用フレーム選択完了（{len(selected)}枚）", 0.24)
         # The former positional end-point correction was only meaningful for
         # independent frame meshes.  TSDF must use each depth camera pose as
         # recorded; altering only translations can make a stable scan worse.
@@ -91,6 +98,7 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
                 max_depth_m=options.max_depth_m,
                 clean_voxel_m=options.clean_voxel_m,
                 refine_poses=options.refine_poses,
+                preprocess_workers=options.preprocess_workers,
             ),
             progress=progress,
         )
@@ -152,6 +160,7 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
             "pose_refinement": pose_refinement.method,
             "loop_correction_m": round(pose_refinement.translation_correction_m, 5),
             "icp_refined_frames": fusion.icp_refined_frames,
+            "preprocess_workers": fusion.preprocess_workers,
             "scale_factor": round(scale_factor, 6),
             "floor_height_capture_m": round(aligned_scene.floor_height_world, 5),
             "bounds_min_m": aligned_scene.bounds["min"],
@@ -161,8 +170,14 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
             "pointcloud": str(pointcloud.name),
             "cameras": str(cameras_path.name),
             "measurements": str(measurements_path.name),
+            "timings_seconds": {
+                "validation": round(validation_seconds, 3),
+                "quality_and_selection": round(quality_selection_seconds, 3),
+                **fusion.timings_seconds,
+            },
         }
         _report_progress(progress, "品質レポートを作成しています", 0.99)
+        report_started = perf_counter()
         report_html, report_json = write_quality_report(
             output_dir,
             capture_label=capture.source_label,
@@ -171,6 +186,8 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
             selected_ids=[frame.frame_id for frame in selected],
             summary=summary,
         )
+        summary["timings_seconds"]["report"] = round(perf_counter() - report_started, 3)
+        summary["timings_seconds"]["total"] = round(perf_counter() - process_started, 3)
         (output_dir / "processing_manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         _report_progress(progress, "完了", 1.0)
         return ProcessResult(output_dir, raw_glb, clean_glb, report_html, report_json, summary)

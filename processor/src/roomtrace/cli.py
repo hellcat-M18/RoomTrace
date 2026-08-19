@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--max-depth", type=float, default=12.0, help="ignore depth beyond this distance in metres")
     process.add_argument("--tsdf-voxel", type=float, default=0.025, help="TSDF resolution in metres (smaller is finer and slower)")
     process.add_argument("--tsdf-trunc", type=float, default=0.10, help="TSDF truncation distance in metres")
+    process.add_argument("--workers", type=int, default=0, help="parallel preprocessing/ICP workers; 0 selects automatically")
     process.add_argument("--reference-width", type=float, help="set the final Blender X width in metres")
     process.add_argument("--reference-depth", type=float, help="set the final Blender Y depth in metres")
     process.add_argument("--no-icp", action="store_true", help="disable conservative adjacent-frame pose refinement")
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_depth_m=max(0.5, args.max_depth),
                     tsdf_voxel_m=max(0.005, args.tsdf_voxel),
                     tsdf_trunc_m=max(0.01, args.tsdf_trunc),
+                    preprocess_workers=max(0, args.workers),
                     reference_width_m=args.reference_width if args.reference_width and args.reference_width > 0 else None,
                     reference_depth_m=args.reference_depth if args.reference_depth and args.reference_depth > 0 else None,
                     refine_poses=not args.no_icp,
