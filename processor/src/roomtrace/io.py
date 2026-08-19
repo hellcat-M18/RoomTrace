@@ -179,6 +179,7 @@ def _optional_int(value: Any) -> int | None:
 
 def validate_capture(capture: Capture, verify_checksums: bool = False, inspect_images: bool = False) -> ValidationReport:
     report = ValidationReport(frame_count=len(capture.frames))
+    browser_capture = capture.manifest.get("device", {}).get("source") == "browser-spa"
     if capture.manifest.get("complete") is False:
         report.issues.append(ValidationIssue("error", "incomplete_capture", "manifest marks this capture as unfinished"))
     seen_ids: set[int] = set()
@@ -212,6 +213,8 @@ def validate_capture(capture: Capture, verify_checksums: bool = False, inspect_i
             report.issues.append(ValidationIssue("warning", "unknown_tracking_state", f"unknown tracking state {frame.tracking_state!r}", frame.frame_id))
         if not _is_rigid_pose(frame.pose_c2w):
             report.issues.append(ValidationIssue("warning", "non_rigid_pose", "pose rotation is not close to orthonormal", frame.frame_id))
+        if browser_capture and frame.depth_path:
+            _validate_browser_depth_geometry(frame, report)
 
     if not capture.capabilities.get("rgb", True):
         report.issues.append(ValidationIssue("warning", "rgb_capability_false", "manifest says RGB is unavailable"))
@@ -219,10 +222,60 @@ def validate_capture(capture: Capture, verify_checksums: bool = False, inspect_i
         report.issues.append(ValidationIssue("warning", "depth_capability_false", "manifest says Raw Depth is unavailable; textured geometry cannot be generated without a depth source"))
     if report.depth_frames == 0:
         report.issues.append(ValidationIssue("error", "no_depth", "no usable depth images were found"))
+    if browser_capture and not capture.capabilities.get("rgb_registered_to_depth", False):
+        report.issues.append(
+            ValidationIssue(
+                "warning",
+                "browser_rgb_unregistered",
+                "browser RGB is not calibrated to the WebXR depth sensor; output uses vertex colors instead of texture atlases",
+            )
+        )
 
     if verify_checksums:
         _verify_checksums(capture, report)
     return report
+
+
+def _validate_browser_depth_geometry(frame: FrameRecord, report: ValidationReport) -> None:
+    required = (
+        "depth_pose_c2w",
+        "depth_projection_matrix",
+        "norm_depth_buffer_from_norm_view",
+    )
+    missing = [key for key in required if key not in frame.metadata]
+    if missing:
+        report.issues.append(
+            ValidationIssue(
+                "error",
+                "legacy_browser_depth_geometry",
+                "browser capture lacks WebXR depth view geometry; update the capture page and record again",
+                frame.frame_id,
+            )
+        )
+        return
+    try:
+        depth_pose = matrix4(frame.metadata["depth_pose_c2w"])
+        matrix4(frame.metadata["depth_projection_matrix"])
+        matrix4(frame.metadata["norm_depth_buffer_from_norm_view"])
+    except (TypeError, ValueError):
+        report.issues.append(
+            ValidationIssue(
+                "error",
+                "invalid_browser_depth_geometry",
+                "browser capture has invalid WebXR depth view geometry; record again",
+                frame.frame_id,
+            )
+        )
+        return
+    if not _is_rigid_pose(depth_pose):
+        report.issues.append(
+            ValidationIssue(
+                "error",
+                "invalid_browser_depth_pose",
+                "browser depth sensor pose is not rigid; record again",
+                frame.frame_id,
+            )
+        )
 
 
 def _is_rigid_pose(pose: Any) -> bool:
