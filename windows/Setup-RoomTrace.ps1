@@ -5,7 +5,8 @@ $processorRoot = Join-Path $projectRoot "processor"
 $venvRoot = Join-Path $processorRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
 $markerPath = Join-Path $PSScriptRoot ".roomtrace-installed"
-$setupVersion = "roomtrace-0.5"
+$setupVersion = "roomtrace-0.6"
+$diagnosticPath = Join-Path $PSScriptRoot "RoomTrace-setup-error.txt"
 
 $script:PythonMode = $null
 $script:PythonLauncher = $null
@@ -79,6 +80,46 @@ function Invoke-SystemPython([string[]]$Arguments) {
     }
 }
 
+function Install-RoomTracePackage {
+    Write-Host "Installing RoomTrace and its dependencies..."
+    & $venvPython -m pip install --disable-pip-version-check -e $processorRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Package installation failed. Check the network connection and run RoomTrace.cmd again."
+    }
+}
+
+function Test-RoomTraceEnvironment {
+    $details = (& $venvPython -c "import platform, sys; import roomtrace; import open3d; print('Python', sys.version.replace(chr(10), ' ')); print('Architecture', platform.machine()); print('Open3D', open3d.__version__)" 2>&1 | Out-String).Trim()
+    return [PSCustomObject]@{
+        Ok = ($LASTEXITCODE -eq 0)
+        Details = $details
+    }
+}
+
+function Install-VisualCppRuntime {
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (!$winget) {
+        Write-Host "winget is unavailable; skipping automatic Visual C++ runtime repair."
+        return
+    }
+    Write-Host "Installing or updating the Microsoft Visual C++ x64 runtime..."
+    Write-Host "A Windows administrator confirmation may appear."
+    & $winget.Source install --id Microsoft.VCRedist.2015+.x64 --exact --accept-package-agreements --accept-source-agreements --silent
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Visual C++ runtime installation did not complete; Open3D will still be repaired and tested."
+    }
+}
+
+function Repair-Open3D {
+    Install-VisualCppRuntime
+    Write-Host "Reinstalling Open3D from a fresh package... This can take several minutes."
+    & $venvPython -m pip install --disable-pip-version-check --no-cache-dir --force-reinstall "open3d>=0.18,<0.20"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Open3D reinstallation failed. Check the network connection and available disk space."
+    }
+    Install-RoomTracePackage
+}
+
 try {
     Write-Host "Checking for Python 3.10 or newer..."
     if (!(Set-PythonCommand)) {
@@ -106,15 +147,29 @@ try {
         throw "The Python virtual environment could not be created: $venvRoot"
     }
 
+    if (Test-Path $diagnosticPath) {
+        Remove-Item $diagnosticPath -Force
+    }
     $installedVersion = if (Test-Path $markerPath) { (Get-Content $markerPath -Raw).Trim() } else { "" }
     if ($installedVersion -ne $setupVersion) {
-        Write-Host "Installing RoomTrace and its dependencies..."
-        & $venvPython -m pip install --disable-pip-version-check -e $processorRoot
-        if ($LASTEXITCODE -ne 0) {
-            throw "Package installation failed. Check the network connection and run RoomTrace.cmd again."
-        }
-        Set-Content -Path $markerPath -Value $setupVersion -Encoding ASCII
+        Install-RoomTracePackage
     }
+
+    Write-Host "Testing the RoomTrace environment..."
+    $health = Test-RoomTraceEnvironment
+    if (!$health.Ok) {
+        Write-Host "Open3D health check failed:" -ForegroundColor Yellow
+        Write-Host $health.Details -ForegroundColor Yellow
+        Repair-Open3D
+        $health = Test-RoomTraceEnvironment
+    }
+    if (!$health.Ok) {
+        $diagnostic = "RoomTrace setup could not load Open3D.`r`n`r`n$($health.Details)"
+        Set-Content -Path $diagnosticPath -Value $diagnostic -Encoding UTF8
+        throw "Open3D still cannot be loaded. Restart Windows and run RoomTrace.cmd again. Diagnostic: $diagnosticPath`n$($health.Details)"
+    }
+    Write-Host $health.Details
+    Set-Content -Path $markerPath -Value $setupVersion -Encoding ASCII
 
     try {
         $desktop = [Environment]::GetFolderPath("Desktop")

@@ -274,9 +274,11 @@ def _import_open3d() -> object:
     try:
         import open3d as o3d
     except (ImportError, OSError) as exc:  # pragma: no cover - depends on installation
+        detail = f"{type(exc).__name__}: {exc}"
         raise ProcessingError(
             "Open3D could not be loaded. Re-run Setup-RoomTrace.ps1; if the problem "
-            "continues, restart Windows and check whether security software blocked an Open3D DLL."
+            "continues, restart Windows and check whether security software blocked an Open3D DLL. "
+            f"Underlying error: {detail}"
         ) from exc
     return o3d
 

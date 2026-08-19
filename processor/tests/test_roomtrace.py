@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 
 from roomtrace.io import load_capture, validate_capture
+from roomtrace.errors import ProcessingError
 from roomtrace.fusion import _rectify_depth_to_view, load_open3d
 from roomtrace.pipeline import ProcessOptions, process_capture
 from roomtrace.sample import create_sample_capture
@@ -31,6 +32,11 @@ class RoomTraceEndToEndTests(unittest.TestCase):
         self.assertIs(loaded, sentinel)
         self.assertTrue(events)
         self.assertIn("秒経過", events[0][0])
+
+    def test_open3d_loader_preserves_native_dll_error(self) -> None:
+        with patch("roomtrace.fusion._import_open3d", side_effect=ProcessingError("Underlying error: OSError: missing.dll")):
+            with self.assertRaisesRegex(ProcessingError, "missing.dll"):
+                load_open3d()
 
     def test_depth_rectification_keeps_nearest_collision_without_python_loop(self) -> None:
         depth = np.array([[1000, 900], [800, 700]], dtype=np.uint16)

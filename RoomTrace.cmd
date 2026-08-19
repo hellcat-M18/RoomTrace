@@ -10,7 +10,7 @@ set "ROOMTRACE_MARKER=%ROOMTRACE_ROOT%windows\.roomtrace-installed"
 
 if not exist "%ROOMTRACE_PYTHON%" goto setup
 if not exist "%ROOMTRACE_MARKER%" goto setup
-"%ROOMTRACE_PYTHON%" -c "import roomtrace" >nul 2>&1
+"%ROOMTRACE_PYTHON%" -c "import roomtrace, open3d" >nul 2>&1
 if errorlevel 1 goto setup
 goto launch
 
