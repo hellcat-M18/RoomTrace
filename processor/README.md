@@ -1,6 +1,8 @@
 # RoomTrace Processor
 
-`roomtrace` is the Windows-side processor for `.roomcap` captures. It has no GPU requirement and produces Blender-ready GLB files from synchronized RGB, ARCore pose, and Raw Depth frames. For normal use, double-click the repository's `RoomTrace.cmd`; the Tk UI automatically chooses a safe output folder and can open Blender after processing.
+`roomtrace` is the Windows-side processor for `.roomcap` captures. It has no GPU requirement and produces Blender-ready GLB files from synchronized RGB, pose, and depth frames. For normal use, double-click the repository's `RoomTrace.cmd`; the Tk UI automatically chooses a safe output folder, shows stage-by-stage progress, and can open Blender after processing.
+
+Browser captures use the stored WebXR depth sensor pose, projection matrix, and depth-buffer coordinate transform for reconstruction. A browser capture made before those fields existed is rejected rather than generating a geometrically corrupt GLB; update the GitHub Pages app and record again. Browser RGB is not assumed to be calibrated to the WebXR depth sensor, so browser output uses vertex colors instead of texture atlases.
 
 ```powershell
 py -m venv .venv
