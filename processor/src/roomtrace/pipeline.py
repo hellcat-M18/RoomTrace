@@ -8,14 +8,14 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .atlas import apply_atlas_uv, build_atlases
 from .errors import ProcessingError
-from .geometry import blender_alignment, depth_mesh, merged_point_cloud, scale_scene, voxel_reduce
-from .gltf import GlbTexture, write_glb, write_ply
+from .fusion import FusionOptions, fuse_capture
+from .geometry import blender_alignment, merged_point_cloud, scale_scene
+from .gltf import write_glb, write_ply
 from .io import load_capture, validate_capture
-from .model import Capture, FrameQuality, FrameRecord, MeshData, ValidationReport
-from .pose import apply_loop_closure
-from .quality import read_confidence, read_depth, read_rgb, score_frames, select_keyframes
+from .model import Capture, FrameQuality, FrameRecord, ValidationReport
+from .pose import PoseRefinement
+from .quality import score_frames, select_keyframes
 from .report import write_quality_report
 
 
@@ -30,6 +30,9 @@ class ProcessOptions:
     clean_voxel_m: float = 0.025
     max_frames: int = 600
     max_depth_m: float = 12.0
+    tsdf_voxel_m: float = 0.025
+    tsdf_trunc_m: float = 0.10
+    refine_poses: bool = True
     reference_width_m: float | None = None
     reference_depth_m: float | None = None
     loop_closure: bool = False
@@ -75,81 +78,85 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
         if len(selected) < 2:
             raise ProcessingError("fewer than two usable keyframes remain after quality filtering")
         _report_progress(progress, f"使用フレームを選んでいます（{len(selected)}枚）", 0.24)
-        pose_refinement = apply_loop_closure(selected, enabled=options.loop_closure)
-        world_meshes, mesh_frames, frame_errors = _build_meshes(capture, selected, options, progress=progress)
-        if not world_meshes:
-            raise ProcessingError("no valid triangle mesh could be built from the depth frames")
-        _report_progress(progress, "座標系と床面を整えています", 0.78)
-        aligned_scene = blender_alignment(world_meshes)
+        # The former positional end-point correction was only meaningful for
+        # independent frame meshes.  TSDF must use each depth camera pose as
+        # recorded; altering only translations can make a stable scan worse.
+        fusion = fuse_capture(
+            capture,
+            selected,
+            FusionOptions(
+                voxel_size_m=options.tsdf_voxel_m,
+                sdf_trunc_m=options.tsdf_trunc_m,
+                confidence_threshold=options.confidence_threshold,
+                max_depth_m=options.max_depth_m,
+                clean_voxel_m=options.clean_voxel_m,
+                refine_poses=options.refine_poses,
+            ),
+            progress=progress,
+        )
+        pose_refinement = PoseRefinement(
+            fusion.icp_refined_frames > 0,
+            "open3d_local_icp" if fusion.icp_refined_frames else "webxr_depth_pose",
+            note=(
+                f"conservative local ICP accepted {fusion.icp_refined_frames} pose corrections"
+                if fusion.icp_refined_frames
+                else "TSDF used calibrated depth poses without an ICP correction"
+            ),
+        )
+        _report_progress(progress, "座標系と床面を整えています", 0.88)
+        aligned_scene = blender_alignment([fusion.raw_mesh, fusion.clean_mesh])
         aligned_scene, scale_factor = scale_scene(
             aligned_scene,
             reference_width_m=options.reference_width_m,
             reference_depth_m=options.reference_depth_m,
         )
-        aligned_meshes = aligned_scene.meshes
-        raw_frame_list = [frame for frame, mesh in zip(mesh_frames, aligned_meshes) if len(mesh.indices)]
-        browser_capture = capture.manifest.get("device", {}).get("source") == "browser-spa"
-        texture_registered = bool(capture.capabilities.get("rgb_registered_to_depth", not browser_capture))
-        use_texture_atlas = not browser_capture or texture_registered
-        _report_progress(progress, "テクスチャを準備しています" if use_texture_atlas else "色付き形状を準備しています", 0.84)
-        atlas = build_atlases(capture, raw_frame_list, output_dir / "textures") if use_texture_atlas else None
-        raw_meshes: list[MeshData] = []
-        for frame, mesh in zip(raw_frame_list, aligned_meshes):
-            tile = atlas.tiles.get(frame.frame_id) if atlas else None
-            raw_meshes.append(apply_atlas_uv(mesh, tile) if tile else MeshData(mesh.positions, mesh.indices, None, mesh.colors, mesh.frame_id))
-        textures = [GlbTexture(name=name, data=data, mime_type=atlas.mime_type) for name, data in zip(atlas.names, atlas.images)] if atlas else []
-        _report_progress(progress, "Raw GLBを書き出しています", 0.91)
+        raw_mesh, clean_mesh = aligned_scene.meshes
+        _report_progress(progress, "融合済みメッシュを書き出しています", 0.91)
         raw_glb = write_glb(
             output_dir / "room_reference_raw.glb",
-            raw_meshes,
-            textures=textures,
-            name="RoomTrace Raw Reference",
-            extras={"roomtrace": {"capture_id": capture.capture_id, "coordinate_system": "blender_z_up_meters", "floor_height_world": aligned_scene.floor_height_world}},
+            [raw_mesh],
+            name="RoomTrace TSDF Reference",
+            extras={"roomtrace": {"capture_id": capture.capture_id, "coordinate_system": "blender_z_up_meters", "floor_height_world": aligned_scene.floor_height_world, "reconstruction": fusion.method}},
         )
-        _report_progress(progress, "軽量版メッシュを作成しています", 0.95)
-        clean_mesh = voxel_reduce(aligned_meshes, options.clean_voxel_m)
-        if len(clean_mesh.indices) == 0:
-            fallback = aligned_meshes[0]
-            clean_mesh = MeshData(
-                fallback.positions.copy(),
-                fallback.indices.copy(),
-                colors=fallback.colors.copy() if fallback.colors is not None else None,
-            )
         _report_progress(progress, "Clean GLBを書き出しています", 0.97)
         clean_glb = write_glb(
             output_dir / "room_reference_clean.glb",
             [clean_mesh],
             name="RoomTrace Clean Reference",
-            extras={"roomtrace": {"capture_id": capture.capture_id, "coordinate_system": "blender_z_up_meters", "voxel_size_m": options.clean_voxel_m}},
+            extras={"roomtrace": {"capture_id": capture.capture_id, "coordinate_system": "blender_z_up_meters", "voxel_size_m": options.clean_voxel_m, "reconstruction": fusion.method}},
         )
         point_positions, point_colors = merged_point_cloud([clean_mesh])
         pointcloud = write_ply(output_dir / "pointcloud.ply", point_positions, point_colors)
         frame_errors_path = output_dir / "frame_errors.json"
-        frame_errors_path.write_text(json.dumps(frame_errors, indent=2), encoding="utf-8")
-        cameras_path = _write_cameras(output_dir / "cameras.json", capture, selected, aligned_scene.transform, qualities)
+        frame_errors_path.write_text(json.dumps(fusion.frame_errors, indent=2), encoding="utf-8")
+        cameras_path = _write_cameras(output_dir / "cameras.json", capture, fusion.integrated_frames, aligned_scene.transform, qualities)
         measurements_path = _write_measurements(output_dir / "measurements.csv", aligned_scene.bounds, clean_mesh)
         cache_dir = output_dir / "cache"
         cache_dir.mkdir(exist_ok=True)
         (cache_dir / "selection.json").write_text(
-            json.dumps({"selected_frame_ids": [frame.frame_id for frame in selected], "pose_refinement": asdict(pose_refinement)}, indent=2),
+            json.dumps({"selected_frame_ids": [frame.frame_id for frame in selected], "integrated_frame_ids": [frame.frame_id for frame in fusion.integrated_frames], "reconstruction": fusion.method, "pose_refinement": asdict(pose_refinement)}, indent=2),
             encoding="utf-8",
         )
         summary = {
             "selected_frames": len(selected),
-            "mesh_frames": len(raw_meshes),
-            "raw_vertices": int(sum(len(mesh.positions) for mesh in raw_meshes)),
-            "raw_triangles": int(sum(len(mesh.indices) for mesh in raw_meshes)),
+            "mesh_frames": len(fusion.integrated_frames),
+            "raw_vertices": int(len(raw_mesh.positions)),
+            "raw_triangles": int(len(raw_mesh.indices)),
             "clean_vertices": int(len(clean_mesh.positions)),
             "clean_triangles": int(len(clean_mesh.indices)),
-            "texture_atlases": len(textures),
+            "texture_atlases": 0,
+            "reconstruction": fusion.method,
+            "tsdf_voxel_m": options.tsdf_voxel_m,
+            "tsdf_trunc_m": options.tsdf_trunc_m,
             "depth_frames": validation.depth_frames,
             "pose_refinement": pose_refinement.method,
             "loop_correction_m": round(pose_refinement.translation_correction_m, 5),
+            "icp_refined_frames": fusion.icp_refined_frames,
             "scale_factor": round(scale_factor, 6),
             "floor_height_capture_m": round(aligned_scene.floor_height_world, 5),
             "bounds_min_m": aligned_scene.bounds["min"],
             "bounds_max_m": aligned_scene.bounds["max"],
-            "frame_errors": len(frame_errors),
+            "frame_errors": len(fusion.frame_errors),
             "frame_errors_file": str(frame_errors_path.name),
             "pointcloud": str(pointcloud.name),
             "cameras": str(cameras_path.name),
@@ -199,62 +206,6 @@ def _remove_previous_generated_outputs(output_dir: Path) -> None:
     selection = output_dir / "cache" / "selection.json"
     if selection.is_file():
         selection.unlink()
-
-
-def _build_meshes(
-    capture: Capture,
-    frames: list[FrameRecord],
-    options: ProcessOptions,
-    *,
-    progress: ProgressCallback | None = None,
-) -> tuple[list[MeshData], list[FrameRecord], list[dict[str, Any]]]:
-    meshes: list[MeshData] = []
-    mesh_frames: list[FrameRecord] = []
-    errors: list[dict[str, Any]] = []
-    total = max(1, len(frames))
-    for index, frame in enumerate(frames, start=1):
-        if not frame.depth_path or not capture.exists(frame.depth_path):
-            errors.append({"frame_id": frame.frame_id, "error": "depth_missing"})
-            continue
-        try:
-            rgb = read_rgb(capture, frame)
-            depth = read_depth(capture, frame)
-            confidence = read_confidence(capture, frame, depth.shape)
-            depth_pose = _frame_matrix(frame, "depth_pose_c2w")
-            if depth_pose is None:
-                depth_pose = frame.pose_c2w
-            mesh = depth_mesh(
-                depth,
-                rgb,
-                confidence,
-                capture.intrinsics,
-                depth_pose,
-                frame_id=frame.frame_id,
-                sample_step=options.depth_step,
-                confidence_threshold=options.confidence_threshold,
-                max_depth_m=options.max_depth_m,
-                depth_projection_matrix=_frame_matrix(frame, "depth_projection_matrix"),
-                norm_depth_buffer_from_norm_view=_frame_matrix(frame, "norm_depth_buffer_from_norm_view"),
-            )
-            if mesh is None:
-                errors.append({"frame_id": frame.frame_id, "error": "no_valid_triangles"})
-                continue
-            meshes.append(mesh)
-            mesh_frames.append(frame)
-        except Exception as exc:
-            errors.append({"frame_id": frame.frame_id, "error": str(exc)})
-        _report_progress(progress, f"Depthを形状化しています（{index}/{len(frames)}）", 0.24 + 0.52 * index / total)
-    return meshes, mesh_frames, errors
-
-
-def _frame_matrix(frame: FrameRecord, key: str) -> np.ndarray | None:
-    value = frame.metadata.get(key)
-    if value is None:
-        return None
-    matrix = np.asarray(value, dtype=np.float64)
-    if matrix.size != 16 or not np.all(np.isfinite(matrix)):
-        raise ValueError(f"frame {frame.frame_id} has invalid {key}")
-    return matrix.reshape((4, 4))
 
 
 def _write_cameras(path: Path, capture: Capture, frames: list[FrameRecord], transform: np.ndarray, qualities: dict[int, FrameQuality]) -> Path:

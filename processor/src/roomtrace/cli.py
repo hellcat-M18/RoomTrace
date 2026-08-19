@@ -11,23 +11,25 @@ from .sample import create_sample_capture
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="roomtrace", description="Inspect RoomTrace captures and create Blender reference GLBs")
+    parser = argparse.ArgumentParser(prog="roomtrace", description="Inspect RoomTrace captures and create locally fused Blender GLBs")
     sub = parser.add_subparsers(dest="command", required=True)
     inspect = sub.add_parser("inspect", help="validate a .roomcap directory or ZIP")
     inspect.add_argument("capture", type=Path)
     inspect.add_argument("--verify-checksums", action="store_true")
     inspect.add_argument("--json", action="store_true", dest="as_json")
-    process = sub.add_parser("process", help="create textured Raw/Clean Blender GLBs")
+    process = sub.add_parser("process", help="fuse depth locally and create Raw/Clean Blender GLBs")
     process.add_argument("capture", type=Path)
     process.add_argument("--output", type=Path, required=True)
     process.add_argument("--confidence-threshold", type=int, default=96)
-    process.add_argument("--depth-step", type=int, default=4, help="sample every Nth depth pixel")
+    process.add_argument("--depth-step", type=int, default=1, help="compatibility option; TSDF uses all valid depth pixels")
     process.add_argument("--clean-voxel", type=float, default=0.025, help="clean mesh voxel size in metres")
     process.add_argument("--max-frames", type=int, default=600)
     process.add_argument("--max-depth", type=float, default=12.0, help="ignore depth beyond this distance in metres")
+    process.add_argument("--tsdf-voxel", type=float, default=0.025, help="TSDF resolution in metres (smaller is finer and slower)")
+    process.add_argument("--tsdf-trunc", type=float, default=0.10, help="TSDF truncation distance in metres")
     process.add_argument("--reference-width", type=float, help="set the final Blender X width in metres")
     process.add_argument("--reference-depth", type=float, help="set the final Blender Y depth in metres")
-    process.add_argument("--loop-closure", action="store_true", help="apply a positional correction between first and last pose")
+    process.add_argument("--no-icp", action="store_true", help="disable conservative adjacent-frame pose refinement")
     process.add_argument("--verify-checksums", action="store_true")
     process.add_argument("--force", action="store_true", help="allow writing into a non-empty output directory")
     sample = sub.add_parser("sample", help="generate a small deterministic capture for testing")
@@ -86,9 +88,11 @@ def main(argv: list[str] | None = None) -> int:
                     clean_voxel_m=max(0.001, args.clean_voxel),
                     max_frames=max(2, args.max_frames),
                     max_depth_m=max(0.5, args.max_depth),
+                    tsdf_voxel_m=max(0.005, args.tsdf_voxel),
+                    tsdf_trunc_m=max(0.01, args.tsdf_trunc),
                     reference_width_m=args.reference_width if args.reference_width and args.reference_width > 0 else None,
                     reference_depth_m=args.reference_depth if args.reference_depth and args.reference_depth > 0 else None,
-                    loop_closure=args.loop_closure,
+                    refine_poses=not args.no_icp,
                     verify_checksums=args.verify_checksums,
                     force=args.force,
                 ),

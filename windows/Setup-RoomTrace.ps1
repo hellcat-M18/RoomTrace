@@ -5,7 +5,7 @@ $processorRoot = Join-Path $projectRoot "processor"
 $venvRoot = Join-Path $processorRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
 $markerPath = Join-Path $PSScriptRoot ".roomtrace-installed"
-$setupVersion = "roomtrace-0.2"
+$setupVersion = "roomtrace-0.3"
 
 $script:PythonMode = $null
 $script:PythonLauncher = $null

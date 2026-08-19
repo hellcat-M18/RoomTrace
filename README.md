@@ -6,7 +6,7 @@ RoomTrace is a practical capture-to-Blender workflow for rebuilding a hotel room
 arrows We2 Plus / ARCore
         ↓  RGB + pose + Raw Depth + confidence
 Windows RoomTrace Processor
-        ↓  quality filtering + metric alignment + textured mesh
+        ↓  quality filtering + local ICP + Open3D TSDF fusion
 Blender
         ↓
 room_reference_raw.glb / room_reference_clean.glb
@@ -24,7 +24,7 @@ room_reference_raw.glb / room_reference_clean.glb
 
 ## ブラウザ版（GitHub Pages）
 
-`web/` は静的HTML/CSS/JavaScriptだけで動くスマホ収録SPA。GitHubへpushしてPagesの公開元をGitHub Actionsにすると、スマホでURLを開いて使える。カメラ映像は `getUserMedia()`、AR姿勢とDepthはWebXR Depth Sensingから取得し、停止時に既存形式の `.roomcap.zip` を端末内で生成する。各DepthフレームにはWebXRのDepthセンサー姿勢・投影行列・Depth座標変換を保存し、PC側はそれを使って再投影する。撮影データをRoomTraceのサーバーへ送る機能は持たない。
+`web/` は静的HTML/CSS/JavaScriptだけで動くスマホ収録SPA。GitHubへpushしてPagesの公開元をGitHub Actionsにすると、スマホでURLを開いて使える。カメラ映像は `getUserMedia()`、AR姿勢とDepthはWebXR Depth Sensingから取得し、停止時に既存形式の `.roomcap.zip` を端末内で生成する。各DepthフレームにはWebXRのDepthセンサー姿勢・投影行列・Depth座標変換を保存し、PC側はそれをOpen3D TSDF融合の入力にする。撮影データをRoomTraceのサーバーへ送る機能は持たない。
 
 ただし、ブラウザのWebXR Depth対応は広く均一ではない。Depthが取得できない端末では「カメラだけの収録」にフォールバックせず、PC側で処理できないZIPを作らない。まず `web/` の対応状況表示がすべてOKになるAndroid Chrome環境で実機確認する。WebXRのDepth Sensing API自体がSecure Context限定かつLimited availabilityである点は、[MDNのDepth API資料](https://developer.mozilla.org/en-US/docs/Web/API/XRFrame/getDepthInformation)にも記載されている。なお、この座標情報を含まない旧ブラウザ版のZIPはPC処理が明示的に拒否するため、ページ更新後に再撮影する。
 
@@ -42,7 +42,7 @@ Blenderでは通常 `room_reference_clean.glb` を先に使い、細部確認が
 
 ## 開発者向け：コマンドラインで実行
 
-The processor requires Python 3.10+, NumPy, and Pillow. It does not require CUDA, ROCm, COLMAP, or Open3D.
+The processor requires Python 3.10+, NumPy, Pillow, and Open3D. It does not require CUDA, ROCm, or COLMAP; Open3D runs on CPU by default.
 
 ```bash
 cd processor
@@ -57,7 +57,7 @@ roomtrace process ..\examples\sample.roomcap --output ..\examples\sample-output 
 roomtrace gui
 ```
 
-The processor writes a self-contained textured GLB, so the primary file does not depend on the source folder. In Blender, use **File → Import → glTF 2.0** and import `room_reference_clean.glb` first, then `room_reference_raw.glb` for detail.
+The processor writes self-contained fused GLBs, so the primary files do not depend on the source folder. Browser WebXR scans are geometry-first because their regular camera image is not registered to the depth sensor; use **File → Import → glTF 2.0** and import `room_reference_clean.glb` first, then `room_reference_raw.glb` for detail.
 
 ## Android build
 

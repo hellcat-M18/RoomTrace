@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roomtrace-processor"
-version = "0.1.0"
-description = "Windows-side reconstruction and Blender export tools for RoomTrace captures"
+version = "0.2.0"
+description = "Fully local Open3D TSDF reconstruction and Blender export tools for RoomTrace captures"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "Pillow>=10.0",
+  "open3d>=0.18,<0.20",
 ]
 
 [project.optional-dependencies]
@@ -25,4 +26,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

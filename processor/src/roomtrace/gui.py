@@ -85,7 +85,7 @@ def launch(initial_capture: Path | None = None) -> None:
         capture_var.set(str(path))
         if output_auto_var.get():
             output_var.set(str(_next_output_dir(path)))
-        status_var.set("準備完了。『Blender用に変換』を押してください")
+        status_var.set("準備完了。『ローカル再構成』を押してください")
         process_button.configure(state="normal")
 
     def choose_capture() -> None:
@@ -163,11 +163,11 @@ def launch(initial_capture: Path | None = None) -> None:
                     open_output_button.configure(state="normal")
                     open_blender_button.configure(state="normal" if _find_blender() else "disabled")
                     status_var.set(
-                        f"完了: {result.summary['raw_triangles']:,} triangles / 出力先: {result.output_dir}"
+                        f"完了: TSDF {result.summary['raw_triangles']:,} triangles / 出力先: {result.output_dir}"
                     )
                     messagebox.showinfo(
                         "RoomTrace",
-                        "Blender用データを作成しました。\n\n"
+                        "ローカルTSDF再構成を完了しました。\n\n"
                         f"出力先:\n{result.output_dir}\n\n"
                         "Clean GLBを先にBlenderへ読み込み、Raw GLBを細部確認に使ってください。",
                     )
@@ -217,7 +217,7 @@ def launch(initial_capture: Path | None = None) -> None:
     heading.grid(row=0, column=0, columnspan=3, padx=18, pady=(18, 4), sticky="w")
     ttk.Label(
         root,
-        text="撮影ZIPを選ぶ → 変換する → Blenderで部屋を作る",
+        text="撮影ZIPを選ぶ → PC上でTSDF融合 → Blenderで部屋を作る",
     ).grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 18), sticky="w")
 
     ttk.Label(root, text="撮影データ").grid(row=2, column=0, padx=18, pady=8, sticky="w")
@@ -240,7 +240,7 @@ def launch(initial_capture: Path | None = None) -> None:
 
     process_button = ttk.Button(
         root,
-        text="Blender用に変換",
+        text="ローカル再構成",
         command=process,
         state="normal" if initial_capture else "disabled",
     )

@@ -369,7 +369,9 @@ function shouldCapture(time, matrix) {
   const elapsed = time - state.lastCaptureTime;
   const translation = distance3(posePosition(matrix), posePosition(state.lastPose));
   const rotation = rotationAngleDegrees(matrix, state.lastPose);
-  return elapsed >= 500 || translation >= 0.03 || rotation >= 3;
+  // Dense overlapping observations are essential for TSDF fusion.  The store
+  // remains append-only, so this controls sampling rather than imposing a cap.
+  return elapsed >= 250 || translation >= 0.02 || rotation >= 2;
 }
 
 function deriveIntrinsics(view) {

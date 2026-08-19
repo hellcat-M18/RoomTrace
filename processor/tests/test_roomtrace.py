@@ -29,13 +29,13 @@ class RoomTraceEndToEndTests(unittest.TestCase):
             )
             self.assertTrue(result.raw_glb.exists())
             self.assertTrue(result.clean_glb.exists())
-            self.assertTrue((result.output_dir / "textures" / "texture_atlas_000.jpg").exists())
             self.assertGreater(result.summary["raw_triangles"], 0)
             self.assertGreater(result.summary["clean_triangles"], 0)
+            self.assertEqual(result.summary["reconstruction"], "open3d_scalable_tsdf")
             self.assertGreater(result.summary["scale_factor"], 1.0)
             width = result.summary["bounds_max_m"][0] - result.summary["bounds_min_m"][0]
             self.assertAlmostEqual(width, 5.0, places=3)
-            self.assert_glb(result.raw_glb, expected_images=1)
+            self.assert_glb(result.raw_glb, expected_images=0)
             self.assert_glb(result.clean_glb, expected_images=0)
 
     def test_zip_capture_is_readable(self) -> None:
