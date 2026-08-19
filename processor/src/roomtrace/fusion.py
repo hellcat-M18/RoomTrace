@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Callable, Iterator
@@ -75,19 +75,18 @@ def fuse_capture(
     options: FusionOptions,
     *,
     progress: ProgressCallback | None = None,
+    o3d_module: object | None = None,
+    open3d_load_seconds: float | None = None,
 ) -> FusionResult:
     """Fuse calibrated frames into a single mesh using Open3D ScalableTSDF."""
     fusion_started = perf_counter()
-    _progress(progress, "Open3Dを読み込んでいます", 0.245)
-    open3d_load_started = perf_counter()
-    try:
-        import open3d as o3d
-    except ImportError as exc:  # pragma: no cover - depends on installation
-        raise ProcessingError(
-            "Open3D is required for reconstruction. Re-run Setup-RoomTrace.ps1 "
-            "or install the processor package with its Open3D dependency."
-        ) from exc
-    open3d_load_seconds = perf_counter() - open3d_load_started
+    if o3d_module is None:
+        open3d_load_started = perf_counter()
+        o3d = load_open3d(progress=progress, fraction=0.245)
+        open3d_load_seconds = perf_counter() - open3d_load_started
+    else:
+        o3d = o3d_module
+        open3d_load_seconds = max(0.0, float(open3d_load_seconds or 0.0))
 
     browser_capture = capture.manifest.get("device", {}).get("source") == "browser-spa"
     registered_rgb = bool(capture.capabilities.get("rgb_registered_to_depth", not browser_capture))
@@ -252,6 +251,34 @@ def fuse_capture(
         preprocess_workers=worker_count,
         timings_seconds={key: round(value, 3) for key, value in timings.items()},
     )
+
+
+def load_open3d(*, progress: ProgressCallback | None = None, fraction: float = 0.04) -> object:
+    """Load Open3D early while emitting a heartbeat for slow Windows DLL loads."""
+    started = perf_counter()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RoomTraceOpen3D")
+    future = executor.submit(_import_open3d)
+    try:
+        while True:
+            try:
+                return future.result(timeout=0.5)
+            except FutureTimeoutError:
+                elapsed = perf_counter() - started
+                heartbeat_fraction = min(0.09, fraction + elapsed * 0.004)
+                _progress(progress, f"Open3Dを初期化しています（{elapsed:.0f}秒経過）", heartbeat_fraction)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _import_open3d() -> object:
+    try:
+        import open3d as o3d
+    except (ImportError, OSError) as exc:  # pragma: no cover - depends on installation
+        raise ProcessingError(
+            "Open3D could not be loaded. Re-run Setup-RoomTrace.ps1; if the problem "
+            "continues, restart Windows and check whether security software blocked an Open3D DLL."
+        ) from exc
+    return o3d
 
 
 def _prepare_frames(

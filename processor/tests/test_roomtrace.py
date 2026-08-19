@@ -3,19 +3,35 @@ from __future__ import annotations
 import json
 import struct
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from roomtrace.io import load_capture, validate_capture
-from roomtrace.fusion import _rectify_depth_to_view
+from roomtrace.fusion import _rectify_depth_to_view, load_open3d
 from roomtrace.pipeline import ProcessOptions, process_capture
 from roomtrace.sample import create_sample_capture
 
 
 class RoomTraceEndToEndTests(unittest.TestCase):
+    def test_open3d_loader_reports_heartbeat_during_slow_dll_load(self) -> None:
+        events: list[tuple[str, float]] = []
+        sentinel = object()
+
+        def slow_import() -> object:
+            time.sleep(0.55)
+            return sentinel
+
+        with patch("roomtrace.fusion._import_open3d", side_effect=slow_import):
+            loaded = load_open3d(progress=lambda message, fraction: events.append((message, fraction)))
+        self.assertIs(loaded, sentinel)
+        self.assertTrue(events)
+        self.assertIn("秒経過", events[0][0])
+
     def test_depth_rectification_keeps_nearest_collision_without_python_loop(self) -> None:
         depth = np.array([[1000, 900], [800, 700]], dtype=np.uint16)
         valid = np.ones((2, 2), dtype=bool)

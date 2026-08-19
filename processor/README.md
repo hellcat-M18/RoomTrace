@@ -35,3 +35,9 @@ serial path and the default `--workers 0` chooses a safe value automatically.
 under `timings_seconds`, including Open3D loading, quality selection,
 preprocessing wait, aggregate ICP worker time, TSDF integration, and mesh
 cleanup. Worker sums may overlap and therefore should not be added together.
+
+Open3D is initialized before the capture archive and hundreds of images are
+opened. On a slow first DLL load, both the desktop UI and CLI display elapsed
+seconds instead of appearing frozen. The desktop UI transfers worker updates
+through a main-thread event queue so Windows continues repainting throughout
+native Open3D initialization.

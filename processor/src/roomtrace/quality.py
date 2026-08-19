@@ -4,7 +4,7 @@ import io
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 from PIL import Image
@@ -84,17 +84,32 @@ def score_frames(
     frames: Iterable[FrameRecord] | None = None,
     *,
     workers: int = 0,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[int, FrameQuality]:
     selected = list(frames if frames is not None else capture.frames)
     if not selected:
         return {}
     worker_count = _quality_worker_count(workers, len(selected))
     if worker_count == 1:
-        results = [score_frame(capture, frame) for frame in selected]
+        results = []
+        for index, frame in enumerate(selected, start=1):
+            results.append(score_frame(capture, frame))
+            _quality_progress(progress, index, len(selected))
     else:
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="RoomTraceQuality") as executor:
-            results = list(executor.map(lambda frame: score_frame(capture, frame), selected))
+            results = []
+            for index, result in enumerate(executor.map(lambda frame: score_frame(capture, frame), selected), start=1):
+                results.append(result)
+                _quality_progress(progress, index, len(selected))
     return {quality.frame_id: quality for quality in results}
+
+
+def _quality_progress(callback: Callable[[int, int], None] | None, completed: int, total: int) -> None:
+    if callback is None:
+        return
+    step = max(1, total // 100)
+    if completed == total or completed % step == 0:
+        callback(completed, total)
 
 
 def _quality_worker_count(requested: int, frame_count: int) -> int:

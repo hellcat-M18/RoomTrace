@@ -10,7 +10,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .errors import ProcessingError
-from .fusion import FusionOptions, fuse_capture
+from .fusion import FusionOptions, fuse_capture, load_open3d
 from .geometry import blender_alignment, merged_point_cloud, scale_scene
 from .gltf import write_glb, write_ply
 from .io import load_capture, validate_capture
@@ -67,6 +67,10 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
     output_dir.mkdir(parents=True, exist_ok=True)
     if options.force:
         _remove_previous_generated_outputs(output_dir)
+    open3d_started = perf_counter()
+    _report_progress(progress, "Open3Dを先に初期化しています", 0.03)
+    o3d = load_open3d(progress=progress, fraction=0.04)
+    open3d_load_seconds = perf_counter() - open3d_started
     with load_capture(path) as capture:
         validation_started = perf_counter()
         _report_progress(progress, "撮影データを検証しています", 0.10)
@@ -79,7 +83,15 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
         validation_seconds = perf_counter() - validation_started
         quality_started = perf_counter()
         _report_progress(progress, "画像品質を並列確認しています", 0.18)
-        qualities = score_frames(capture, workers=options.preprocess_workers)
+        qualities = score_frames(
+            capture,
+            workers=options.preprocess_workers,
+            progress=lambda completed, total: _report_progress(
+                progress,
+                f"画像品質を確認しています（{completed}/{total}）",
+                0.18 + 0.055 * completed / max(1, total),
+            ),
+        )
         selected = select_keyframes(capture.frames, qualities, max_frames=options.max_frames)
         quality_selection_seconds = perf_counter() - quality_started
         if len(selected) < 2:
@@ -101,6 +113,8 @@ def process_capture(path: str | Path, options: ProcessOptions, *, progress: Prog
                 preprocess_workers=options.preprocess_workers,
             ),
             progress=progress,
+            o3d_module=o3d,
+            open3d_load_seconds=open3d_load_seconds,
         )
         pose_refinement = PoseRefinement(
             fusion.icp_refined_frames > 0,

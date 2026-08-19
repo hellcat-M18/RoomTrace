@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -80,6 +81,7 @@ def launch(initial_capture: Path | None = None) -> None:
     status_var = tk.StringVar(value="撮影データを選択してください")
     output_auto_var = tk.BooleanVar(value=True)
     last_output: Path | None = None
+    event_queue: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
 
     def set_capture(path: Path) -> None:
         capture_var.set(str(path))
@@ -139,11 +141,9 @@ def launch(initial_capture: Path | None = None) -> None:
         status_var.set("処理を開始しています…")
 
         def update_progress(message: str, fraction: float) -> None:
-            def apply() -> None:
-                progress.configure(value=round(fraction * 100))
-                status_var.set(f"{message}（{round(fraction * 100)}%）")
-
-            root.after(0, apply)
+            # Tk calls from a worker thread can stop repainting on Windows
+            # while native DLLs are loading. The main loop consumes this queue.
+            event_queue.put(("progress", (message, fraction)))
 
         def work() -> None:
             try:
@@ -152,9 +152,24 @@ def launch(initial_capture: Path | None = None) -> None:
                     ProcessOptions(output_dir=output, verify_checksums=True, force=False),
                     progress=update_progress,
                 )
+                event_queue.put(("finished", result))
+            except Exception as error:
+                event_queue.put(("failed", str(error)))
 
-                def finished() -> None:
-                    nonlocal last_output
+        threading.Thread(target=work, name="RoomTraceGuiProcess", daemon=True).start()
+
+    def poll_worker_events() -> None:
+        nonlocal last_output
+        try:
+            while True:
+                kind, payload = event_queue.get_nowait()
+                if kind == "progress":
+                    message, fraction = payload
+                    percent = round(float(fraction) * 100)
+                    progress.configure(value=percent)
+                    status_var.set(f"{message}（{percent}%）")
+                elif kind == "finished":
+                    result = payload
                     last_output = result.output_dir
                     progress.configure(value=100)
                     choose_capture_button.configure(state="normal")
@@ -171,21 +186,17 @@ def launch(initial_capture: Path | None = None) -> None:
                         f"出力先:\n{result.output_dir}\n\n"
                         "Clean GLBを先にBlenderへ読み込み、Raw GLBを細部確認に使ってください。",
                     )
-
-                root.after(0, finished)
-            except Exception as error:
-
-                def failed() -> None:
+                elif kind == "failed":
+                    error = str(payload)
                     progress.configure(value=0)
                     choose_capture_button.configure(state="normal")
                     choose_output_button.configure(state="normal")
                     process_button.configure(state="normal")
                     status_var.set(f"失敗: {error}")
-                    messagebox.showerror("RoomTrace", str(error))
-
-                root.after(0, failed)
-
-        threading.Thread(target=work, name="RoomTraceGuiProcess", daemon=True).start()
+                    messagebox.showerror("RoomTrace", error)
+        except queue.Empty:
+            pass
+        root.after(100, poll_worker_events)
 
     def open_output() -> None:
         if last_output and last_output.exists():
@@ -265,4 +276,5 @@ def launch(initial_capture: Path | None = None) -> None:
 
     if initial_capture:
         root.after(200, process)
+    root.after(100, poll_worker_events)
     root.mainloop()
