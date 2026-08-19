@@ -4,7 +4,7 @@ import csv
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -17,6 +17,9 @@ from .model import Capture, FrameQuality, FrameRecord, MeshData, ValidationRepor
 from .pose import apply_loop_closure
 from .quality import read_confidence, read_depth, read_rgb, score_frames, select_keyframes
 from .report import write_quality_report
+
+
+ProgressCallback = Callable[[str, float], None]
 
 
 @dataclass
@@ -50,7 +53,8 @@ def inspect_capture(path: str | Path, *, verify_checksums: bool = False, inspect
     return capture, report
 
 
-def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
+def process_capture(path: str | Path, options: ProcessOptions, *, progress: ProgressCallback | None = None) -> ProcessResult:
+    _report_progress(progress, "撮影データを読み込んでいます", 0.02)
     output_dir = Path(options.output_dir).expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()) and not options.force:
         raise ProcessingError(f"output directory is not empty: {output_dir} (use --force to replace generated files)")
@@ -58,20 +62,24 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
     if options.force:
         _remove_previous_generated_outputs(output_dir)
     with load_capture(path) as capture:
+        _report_progress(progress, "撮影データを検証しています", 0.10)
         validation = validate_capture(capture, verify_checksums=options.verify_checksums, inspect_images=True)
         if validation.errors:
             messages = "; ".join(issue.message for issue in validation.errors[:5])
             raise ProcessingError(f"capture validation failed: {messages}")
         if validation.depth_frames == 0:
             raise ProcessingError("no depth frames are available; RoomTrace needs Raw Depth or an imported MVS depth source to produce a mesh")
+        _report_progress(progress, "画像品質を確認しています", 0.18)
         qualities = score_frames(capture)
         selected = select_keyframes(capture.frames, qualities, max_frames=options.max_frames)
         if len(selected) < 2:
             raise ProcessingError("fewer than two usable keyframes remain after quality filtering")
+        _report_progress(progress, f"使用フレームを選んでいます（{len(selected)}枚）", 0.24)
         pose_refinement = apply_loop_closure(selected, enabled=options.loop_closure)
-        world_meshes, mesh_frames, frame_errors = _build_meshes(capture, selected, options)
+        world_meshes, mesh_frames, frame_errors = _build_meshes(capture, selected, options, progress=progress)
         if not world_meshes:
             raise ProcessingError("no valid triangle mesh could be built from the depth frames")
+        _report_progress(progress, "座標系と床面を整えています", 0.78)
         aligned_scene = blender_alignment(world_meshes)
         aligned_scene, scale_factor = scale_scene(
             aligned_scene,
@@ -80,12 +88,17 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
         )
         aligned_meshes = aligned_scene.meshes
         raw_frame_list = [frame for frame, mesh in zip(mesh_frames, aligned_meshes) if len(mesh.indices)]
-        atlas = build_atlases(capture, raw_frame_list, output_dir / "textures")
+        browser_capture = capture.manifest.get("device", {}).get("source") == "browser-spa"
+        texture_registered = bool(capture.capabilities.get("rgb_registered_to_depth", not browser_capture))
+        use_texture_atlas = not browser_capture or texture_registered
+        _report_progress(progress, "テクスチャを準備しています" if use_texture_atlas else "色付き形状を準備しています", 0.84)
+        atlas = build_atlases(capture, raw_frame_list, output_dir / "textures") if use_texture_atlas else None
         raw_meshes: list[MeshData] = []
         for frame, mesh in zip(raw_frame_list, aligned_meshes):
-            tile = atlas.tiles.get(frame.frame_id)
+            tile = atlas.tiles.get(frame.frame_id) if atlas else None
             raw_meshes.append(apply_atlas_uv(mesh, tile) if tile else MeshData(mesh.positions, mesh.indices, None, mesh.colors, mesh.frame_id))
-        textures = [GlbTexture(name=name, data=data, mime_type=atlas.mime_type) for name, data in zip(atlas.names, atlas.images)]
+        textures = [GlbTexture(name=name, data=data, mime_type=atlas.mime_type) for name, data in zip(atlas.names, atlas.images)] if atlas else []
+        _report_progress(progress, "Raw GLBを書き出しています", 0.91)
         raw_glb = write_glb(
             output_dir / "room_reference_raw.glb",
             raw_meshes,
@@ -93,6 +106,7 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
             name="RoomTrace Raw Reference",
             extras={"roomtrace": {"capture_id": capture.capture_id, "coordinate_system": "blender_z_up_meters", "floor_height_world": aligned_scene.floor_height_world}},
         )
+        _report_progress(progress, "軽量版メッシュを作成しています", 0.95)
         clean_mesh = voxel_reduce(aligned_meshes, options.clean_voxel_m)
         if len(clean_mesh.indices) == 0:
             fallback = aligned_meshes[0]
@@ -101,6 +115,7 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
                 fallback.indices.copy(),
                 colors=fallback.colors.copy() if fallback.colors is not None else None,
             )
+        _report_progress(progress, "Clean GLBを書き出しています", 0.97)
         clean_glb = write_glb(
             output_dir / "room_reference_clean.glb",
             [clean_mesh],
@@ -140,6 +155,7 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
             "cameras": str(cameras_path.name),
             "measurements": str(measurements_path.name),
         }
+        _report_progress(progress, "品質レポートを作成しています", 0.99)
         report_html, report_json = write_quality_report(
             output_dir,
             capture_label=capture.source_label,
@@ -149,7 +165,13 @@ def process_capture(path: str | Path, options: ProcessOptions) -> ProcessResult:
             summary=summary,
         )
         (output_dir / "processing_manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        _report_progress(progress, "完了", 1.0)
         return ProcessResult(output_dir, raw_glb, clean_glb, report_html, report_json, summary)
+
+
+def _report_progress(progress: ProgressCallback | None, message: str, fraction: float) -> None:
+    if progress:
+        progress(message, max(0.0, min(1.0, fraction)))
 
 
 def _remove_previous_generated_outputs(output_dir: Path) -> None:
@@ -179,11 +201,18 @@ def _remove_previous_generated_outputs(output_dir: Path) -> None:
         selection.unlink()
 
 
-def _build_meshes(capture: Capture, frames: list[FrameRecord], options: ProcessOptions) -> tuple[list[MeshData], list[FrameRecord], list[dict[str, Any]]]:
+def _build_meshes(
+    capture: Capture,
+    frames: list[FrameRecord],
+    options: ProcessOptions,
+    *,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[MeshData], list[FrameRecord], list[dict[str, Any]]]:
     meshes: list[MeshData] = []
     mesh_frames: list[FrameRecord] = []
     errors: list[dict[str, Any]] = []
-    for frame in frames:
+    total = max(1, len(frames))
+    for index, frame in enumerate(frames, start=1):
         if not frame.depth_path or not capture.exists(frame.depth_path):
             errors.append({"frame_id": frame.frame_id, "error": "depth_missing"})
             continue
@@ -191,16 +220,21 @@ def _build_meshes(capture: Capture, frames: list[FrameRecord], options: ProcessO
             rgb = read_rgb(capture, frame)
             depth = read_depth(capture, frame)
             confidence = read_confidence(capture, frame, depth.shape)
+            depth_pose = _frame_matrix(frame, "depth_pose_c2w")
+            if depth_pose is None:
+                depth_pose = frame.pose_c2w
             mesh = depth_mesh(
                 depth,
                 rgb,
                 confidence,
                 capture.intrinsics,
-                frame.pose_c2w,
+                depth_pose,
                 frame_id=frame.frame_id,
                 sample_step=options.depth_step,
                 confidence_threshold=options.confidence_threshold,
                 max_depth_m=options.max_depth_m,
+                depth_projection_matrix=_frame_matrix(frame, "depth_projection_matrix"),
+                norm_depth_buffer_from_norm_view=_frame_matrix(frame, "norm_depth_buffer_from_norm_view"),
             )
             if mesh is None:
                 errors.append({"frame_id": frame.frame_id, "error": "no_valid_triangles"})
@@ -209,7 +243,18 @@ def _build_meshes(capture: Capture, frames: list[FrameRecord], options: ProcessO
             mesh_frames.append(frame)
         except Exception as exc:
             errors.append({"frame_id": frame.frame_id, "error": str(exc)})
+        _report_progress(progress, f"Depthを形状化しています（{index}/{len(frames)}）", 0.24 + 0.52 * index / total)
     return meshes, mesh_frames, errors
+
+
+def _frame_matrix(frame: FrameRecord, key: str) -> np.ndarray | None:
+    value = frame.metadata.get(key)
+    if value is None:
+        return None
+    matrix = np.asarray(value, dtype=np.float64)
+    if matrix.size != 16 or not np.all(np.isfinite(matrix)):
+        raise ValueError(f"frame {frame.frame_id} has invalid {key}")
+    return matrix.reshape((4, 4))
 
 
 def _write_cameras(path: Path, capture: Capture, frames: list[FrameRecord], transform: np.ndarray, qualities: dict[int, FrameQuality]) -> Path:
