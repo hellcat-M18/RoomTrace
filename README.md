@@ -24,9 +24,9 @@ room_reference_raw.glb / room_reference_clean.glb
 
 ## ブラウザ版（GitHub Pages）
 
-`web/` は静的HTML/CSS/JavaScriptだけで動くスマホ収録SPA。GitHubへpushしてPagesの公開元をGitHub Actionsにすると、スマホでURLを開いて使える。カメラ映像は `getUserMedia()`、AR姿勢とDepthはWebXR Depth Sensingから取得し、停止時に既存形式の `.roomcap.zip` を端末内で生成する。撮影データをRoomTraceのサーバーへ送る機能は持たない。
+`web/` は静的HTML/CSS/JavaScriptだけで動くスマホ収録SPA。GitHubへpushしてPagesの公開元をGitHub Actionsにすると、スマホでURLを開いて使える。カメラ映像は `getUserMedia()`、AR姿勢とDepthはWebXR Depth Sensingから取得し、停止時に既存形式の `.roomcap.zip` を端末内で生成する。各DepthフレームにはWebXRのDepthセンサー姿勢・投影行列・Depth座標変換を保存し、PC側はそれを使って再投影する。撮影データをRoomTraceのサーバーへ送る機能は持たない。
 
-ただし、ブラウザのWebXR Depth対応は広く均一ではない。Depthが取得できない端末では「カメラだけの収録」にフォールバックせず、PC側で処理できないZIPを作らない。まず `web/` の対応状況表示がすべてOKになるAndroid Chrome環境で実機確認する。WebXRのDepth Sensing API自体がSecure Context限定かつLimited availabilityである点は、[MDNのDepth API資料](https://developer.mozilla.org/en-US/docs/Web/API/XRFrame/getDepthInformation)にも記載されている。
+ただし、ブラウザのWebXR Depth対応は広く均一ではない。Depthが取得できない端末では「カメラだけの収録」にフォールバックせず、PC側で処理できないZIPを作らない。まず `web/` の対応状況表示がすべてOKになるAndroid Chrome環境で実機確認する。WebXRのDepth Sensing API自体がSecure Context限定かつLimited availabilityである点は、[MDNのDepth API資料](https://developer.mozilla.org/en-US/docs/Web/API/XRFrame/getDepthInformation)にも記載されている。なお、この座標情報を含まない旧ブラウザ版のZIPはPC処理が明示的に拒否するため、ページ更新後に再撮影する。
 
 ## いちばん簡単な使い方（Windows）
 
