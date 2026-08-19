@@ -29,6 +29,8 @@ def depth_mesh(
     min_depth_m: float = 0.15,
     max_depth_m: float = 12.0,
     edge_threshold_m: float = 0.35,
+    depth_projection_matrix: np.ndarray | None = None,
+    norm_depth_buffer_from_norm_view: np.ndarray | None = None,
 ) -> MeshData | None:
     """Convert one ARCore depth image into a triangle mesh in world coordinates.
 
@@ -43,6 +45,8 @@ def depth_mesh(
         confidence = _resize_nearest(confidence, (h, w))
     rgb_h, rgb_w = rgb.shape[:2]
     depth_intrinsics = intrinsics.scaled(w, h)
+    projection = _matrix4_or_none(depth_projection_matrix)
+    view_from_depth = _inverse_matrix4_or_none(norm_depth_buffer_from_norm_view)
     step = max(1, int(sample_step))
     ys = np.arange(0, h, step, dtype=np.int32)
     xs = np.arange(0, w, step, dtype=np.int32)
@@ -61,14 +65,15 @@ def depth_mesh(
         for gx, (x, z, conf) in enumerate(zip(xs, z_values, conf_values)):
             if not (min_depth_m <= z <= max_depth_m and conf >= confidence_threshold and np.isfinite(z)):
                 continue
-            camera = np.array(
-                [
-                    (float(x) - depth_intrinsics.cx) * float(z) / depth_intrinsics.fx,
-                    (float(y) - depth_intrinsics.cy) * float(z) / depth_intrinsics.fy,
-                    -float(z),
-                    1.0,
-                ],
-                dtype=np.float64,
+            camera = _depth_pixel_to_camera(
+                float(x),
+                float(y),
+                float(z),
+                width=w,
+                height=h,
+                intrinsics=depth_intrinsics,
+                projection=projection,
+                view_from_depth=view_from_depth,
             )
             world = pose_c2w @ camera
             positions[gy, gx] = world[:3].astype(np.float32)
@@ -104,6 +109,70 @@ def depth_mesh(
     if not faces:
         return None
     return MeshData(flat_positions, np.asarray(faces, dtype=np.uint32), flat_uvs, flat_colors, frame_id)
+
+
+def _matrix4_or_none(value: np.ndarray | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    matrix = np.asarray(value, dtype=np.float64)
+    if matrix.size != 16 or not np.all(np.isfinite(matrix)):
+        return None
+    return matrix.reshape((4, 4))
+
+
+def _inverse_matrix4_or_none(value: np.ndarray | None) -> np.ndarray | None:
+    matrix = _matrix4_or_none(value)
+    if matrix is None:
+        return None
+    try:
+        inverse = np.linalg.inv(matrix)
+    except np.linalg.LinAlgError:
+        return None
+    return inverse if np.all(np.isfinite(inverse)) else None
+
+
+def _depth_pixel_to_camera(
+    x: float,
+    y: float,
+    z: float,
+    *,
+    width: int,
+    height: int,
+    intrinsics: Intrinsics,
+    projection: np.ndarray | None,
+    view_from_depth: np.ndarray | None,
+) -> np.ndarray:
+    """Back-project one depth texel using its WebXR view geometry when present."""
+    if projection is not None and view_from_depth is not None:
+        normalized_depth = np.array([(x + 0.5) / width, (y + 0.5) / height, 0.0, 1.0], dtype=np.float64)
+        normalized_view = view_from_depth @ normalized_depth
+        if abs(float(normalized_view[3])) > 1e-8:
+            normalized_view /= normalized_view[3]
+        view_x = float(normalized_view[0])
+        view_y = float(normalized_view[1])
+        ndc_x = view_x * 2.0 - 1.0
+        ndc_y = 1.0 - view_y * 2.0
+        fx = float(projection[0, 0])
+        fy = float(projection[1, 1])
+        if abs(fx) > 1e-8 and abs(fy) > 1e-8:
+            return np.array(
+                [
+                    (ndc_x + float(projection[0, 2])) * z / fx,
+                    (ndc_y + float(projection[1, 2])) * z / fy,
+                    -z,
+                    1.0,
+                ],
+                dtype=np.float64,
+            )
+    return np.array(
+        [
+            (x - intrinsics.cx) * z / intrinsics.fx,
+            (y - intrinsics.cy) * z / intrinsics.fy,
+            -z,
+            1.0,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _too_large(points: np.ndarray, threshold: float) -> bool:
