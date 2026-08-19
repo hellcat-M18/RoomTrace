@@ -405,6 +405,24 @@ function depthToMillimeters(depthInfo, dataFormat) {
   return values;
 }
 
+function depthFrameGeometry(depthInfo, pose, view) {
+  const depthTransform = depthInfo.transform?.matrix || pose.transform.matrix;
+  const depthProjection = depthInfo.projectionMatrix || view.projectionMatrix;
+  const depthBufferFromView = depthInfo.normDepthBufferFromNormView?.matrix || [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  return {
+    depth_pose_c2w: rowMajorMatrix(depthTransform),
+    depth_projection_matrix: rowMajorMatrix(depthProjection),
+    norm_depth_buffer_from_norm_view: rowMajorMatrix(depthBufferFromView),
+    depth_coordinate_system: "webxr-depth-view-v1",
+    rgb_registration: "unregistered_getUserMedia",
+  };
+}
+
 function derivedConfidence(depthMillimeters) {
   const confidence = new Uint8Array(depthMillimeters.length);
   for (let index = 0; index < depthMillimeters.length; index += 1) {
@@ -430,6 +448,7 @@ async function captureFrame(time, pose, view, depthInfo) {
   const rowMajorPose = rowMajorMatrix(pose.transform.matrix);
   const depthMillimeters = depthToMillimeters(depthInfo, state.depthDataFormat);
   const confidence = derivedConfidence(depthMillimeters);
+  const depthGeometry = depthFrameGeometry(depthInfo, pose, view);
   if (!state.intrinsics) state.intrinsics = deriveIntrinsics(view);
 
   const context = ui.camera.getContext("2d", { alpha: false });
@@ -454,6 +473,7 @@ async function captureFrame(time, pose, view, depthInfo) {
       depth_data_format: state.depthDataFormat,
       depth_type: state.depthType,
       confidence_source: "derived_from_depth_validity",
+      ...depthGeometry,
     },
   };
   if (!state.recording || state.store !== store) return;
@@ -621,6 +641,8 @@ async function exportCapture() {
       pose: true,
       raw_depth: true,
       depth_confidence: true,
+      depth_view_geometry: true,
+      rgb_registered_to_depth: false,
     },
     coordinate_system: {
       pose: "camera_to_world",
@@ -634,6 +656,8 @@ async function exportCapture() {
       depth_data_format: state.depthDataFormat,
       depth_type: state.depthType,
       confidence_source: "derived_from_depth_validity",
+      depth_coordinate_system: "webxr-depth-view-v1",
+      rgb_registration: "unregistered_getUserMedia",
     },
     files: {
       frames: "frames.jsonl",
